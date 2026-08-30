@@ -26,7 +26,9 @@ external DAC and headphone amplifier feeding a 3.5 mm jack.
 | **I²S output** | 16-bit PCM to an external DAC. APLL-clocked for accurate 44.1 kHz. |
 | **AVRCP, both roles** | Phone's volume slider works; track metadata comes back; buttons drive transport. |
 | **Parametric EQ** | Five biquad bands per channel, sample-rate aware, ~16% of one core when fully active. |
-| **Physical UI** | One multi-function button, optional volume keys, PWM status LED. |
+| **OLED status screen** | 128x64 SSD1306 over I2C: track, artist, transport, volume, battery. |
+| **Battery gauge** | ADC on a divider, Li-po curve, low and critical warnings. |
+| **Physical UI** | One multi-function button, optional volume keys, optional PWM status LED. |
 | **Power policy** | Capped TX power, 80–160 MHz frequency scaling, deep sleep on idle. |
 | **Bounded pairing** | Discoverable only when you ask for it, not permanently. |
 
@@ -41,6 +43,8 @@ flowchart LR
         DSP["Ring buffer<br/>+ EQ + volume"]
         DAC["PCM5102A<br/>I²S DAC"]
         AMP["Headphone amp"]
+        OLED["SSD1306 OLED<br/><i>I²C</i>"]
+        BATT["Li-po + divider<br/><i>ADC</i>"]
     end
     JACK["3.5 mm<br/>headphones"]
 
@@ -49,6 +53,8 @@ flowchart LR
     DSP -- "I²S" --> DAC
     DAC -- "line level" --> AMP
     AMP --> JACK
+    BT -. "track, volume" .-> OLED
+    BATT -. "percent" .-> OLED
 ```
 
 ## Firmware architecture
@@ -93,6 +99,8 @@ task, pinned to the core the radio is not using.
 | [`audio_dsp`](components/audio_dsp/) | Parametric biquad equaliser and its benchmark |
 | [`puck_avrcp`](components/puck_avrcp/) | AVRCP controller and target: volume, metadata, transport keys |
 | [`puck_ui`](components/puck_ui/) | Button gestures and PWM status LED |
+| [`puck_display`](components/puck_display/) | SSD1306 panel driver, framebuffer, screens |
+| [`puck_battery`](components/puck_battery/) | ADC sensing and the Li-po discharge curve |
 | [`puck_power`](components/puck_power/) | TX power, frequency scaling, idle deep sleep |
 
 These are written from scratch against the IDF v5.5 API rather than reusing the
@@ -102,29 +110,47 @@ and would make the repository unbuildable anywhere else. See
 
 ## Hardware
 
-> [!WARNING]
-> **The wiring below is planned, not verified.** No DAC has been connected to
-> the prototype yet. Treat the pin map as a proposal to check, not as as-built.
+The pin map follows the layout that lets a PCM5102A board sit **directly under**
+an ESP32 devkit on short solder bridges, rather than the pins that happen to be
+convenient on a breadboard.
 
-| ESP32 | PCM5102A | Signal |
+| ESP32 | Signal | Goes to |
 | --- | --- | --- |
-| GPIO 26 | BCK | Bit clock |
-| GPIO 25 | LRCK | Word select (L/R) |
-| GPIO 22 | DIN | Serial data |
-| 3V3 | VIN | Power |
-| GND | GND | Ground |
-| GPIO 33 | — | Main button, to GND (also an RTC pin, so it wakes from deep sleep) |
-| GPIO 2 | — | Status LED (on-board on most devkits) |
+| GPIO 4 | I²S BCK | PCM5102A `BCK` |
+| GPIO 15 | I²S LRCK | PCM5102A `LRCK` |
+| GPIO 2 | I²S DATA | PCM5102A `DIN` |
+| GPIO 21 | I²C SDA | SSD1306 `SDA` |
+| GPIO 22 | I²C SCL | SSD1306 `SCL` |
+| GPIO 33 | Button | to GND (an RTC pin, so it wakes from deep sleep) |
+| GPIO 35 | Battery sense | divider midpoint (optional, unfitted by default) |
+| 3V3, GND | Power | both boards |
 
-PCM5102A breakout jumpers — these cause most "no sound" reports:
+> [!NOTE]
+> **No MCLK/SCK wire to the DAC.** Solder the `SCK` bridge on the front of the
+> PCM5102A instead and it derives its own clock from BCK. Leave the ESP32 pin
+> beneath it unconnected — a strip of tape stops it shorting to anything.
 
-| Pin | Tie to | Why |
+> [!IMPORTANT]
+> **GPIO 2 is the devkit's on-board LED pin and a strapping pin.** It now
+> carries I²S data, so the on-board LED flickers with audio — harmless, and the
+> reason `PUCK_LED_GPIO` defaults to *not fitted*. It also means the board may
+> refuse to enter download mode if the DAC holds that line high during reset;
+> holding **BOOT** while flashing works around it.
+
+PCM5102A jumpers — these cause most "no sound" reports:
+
+| Pin | Set to | Why |
 | --- | --- | --- |
-| SCK | GND | Use the internal PLL. Left floating you get silence. |
+| SCK bridge | **soldered** | Runs the internal PLL, so no MCLK wire is needed |
 | XSMT | 3V3 | Release soft-mute. Low means muted. |
-| FMT | GND | I²S (Philips) frame format, which is what the firmware defaults to |
+| FMT | GND | I²S (Philips) frame format, which is the firmware default |
 | FLT | GND | Normal latency filter |
 | DEMP | GND | De-emphasis off |
+
+**Battery sensing** is optional and off by default. To fit it, run a divider
+from the cell to GPIO 35 — two 100 kΩ resistors give 2:1, fits the ADC range
+with a full 4.2 V cell, and draws about 21 µA — then set
+`PUCK_BATTERY_ADC_GPIO=35` and the ratio to match your resistors.
 
 Full parts discussion, power budget and the roadmap to a custom board:
 [docs/hardware.md](docs/hardware.md).
@@ -147,11 +173,17 @@ Expected first output:
 
 ```
 I (593) puck: BlueAudio Puck booting (IDF v5.5.4)
-I (603) audio_sink: ready: bck=26 ws=25 dout=22, 32 kB buffer, prefetch 25%
+I (603) audio_sink: ready: bck=4 ws=15 dout=2, 32 kB buffer, prefetch 25%
 I (603) audio_dsp: 5-band equaliser ready at 44100 Hz (off, 0 active)
-I (1313) bt_core: controller up, address 6c:c8:40:56:ea:da
+I (613) ssd1306: 128x64 panel at 0x3c on SDA=21 SCL=22
+I (1313) bt_core: controller up, address ...
 I (1373) puck: no bonded sources; discoverable as "BlueAudio Puck"
 ```
+
+> [!TIP]
+> If flashing fails with `Wrong boot mode detected (0x13)`, hold the **BOOT**
+> button as the flash starts. Some devkits — and any board where GPIO 2 is
+> loaded by the DAC — will not auto-reset into download mode.
 
 ## Using it
 
@@ -163,12 +195,35 @@ I (1373) puck: no bonded sources; discoverable as "BlueAudio Puck"
 | Hold 1.5 s | Open a pairing window (120 s) |
 | Hold 5 s | Forget every bonded source, then reopen pairing |
 
+### The screen
+
+| Screen | When |
+| --- | --- |
+| Splash | While the stack comes up |
+| `PAIRING` | Discoverable, waiting for a source |
+| `IDLE` | Connectable, nothing connected |
+| Now playing | Track and artist, transport state, volume bar, battery |
+
+The track title scrolls when it is too long, pausing at each end — continuous
+sliding is much harder to read. Volume changes raise a brief toast over the
+bottom of the screen. Battery shows as a percentage and an icon, or `USB` when
+no sense divider is fitted.
+
+At start-up the panel runs a **self test** — solid fill, checkerboard, then a
+border — before any text is drawn. None of it uses the font, which is the
+point: it separates a bus or panel fault from a text-rendering fault.
+
+### The optional LED
+
 | LED | Meaning |
 | --- | --- |
 | Fast blink | Discoverable, waiting for a source |
 | Slow breathe | Connected, not streaming |
 | Steady dim | Audio playing |
 | Triple flash | Something failed to start |
+
+Unfitted by default, because GPIO 2 now carries I²S data and the screen shows
+the same states in words.
 
 Volume normally comes from the phone over AVRCP absolute volume. Dedicated
 volume buttons are optional and unfitted by default.
@@ -181,7 +236,14 @@ All under `idf.py menuconfig` → **BlueAudio Puck**. Every GPIO accepts `-1` fo
 | Option | Default | Notes |
 | --- | --- | --- |
 | `PUCK_BT_DEVICE_NAME` | `BlueAudio Puck` | Shown in the pairing list |
-| `PUCK_I2S_BCK/LRCK/DOUT_GPIO` | 26 / 25 / 22 | |
+| `PUCK_I2S_BCK/LRCK/DOUT_GPIO` | 4 / 15 / 2 | Direct-solder layout |
+| `PUCK_I2C_SDA/SCL_GPIO` | 21 / 22 | `-1` disables the display |
+| `PUCK_DISPLAY_I2C_ADDRESS` | 0x3C | Some modules strap to 0x3D |
+| `PUCK_DISPLAY_CONTRAST` | 127 | |
+| `PUCK_DISPLAY_SELF_TEST` | on | ~1.4 s of boot time |
+| `PUCK_BATTERY_ADC_GPIO` | -1 | ADC1 pins only (32–39) |
+| `PUCK_BATTERY_DIVIDER_RATIO_X100` | 200 | 2:1; must match your resistors |
+| `PUCK_LED_GPIO` | -1 | GPIO 2 is now I²S data |
 | `PUCK_I2S_SLOT_FORMAT` | Philips | Must match the DAC's `FMT` pin |
 | `PUCK_I2S_USE_APLL` | on | Accurate 44.1 kHz, slightly more current |
 | `PUCK_AUDIO_RINGBUF_KB` | 32 | Larger rides out radio retries, costs RAM and latency |
@@ -201,7 +263,9 @@ All under `idf.py menuconfig` → **BlueAudio Puck**. Every GPIO accepts `-1` fo
 | --- | --- |
 | EQ cost, 5 stereo biquad sections | 1337 µs per 360-frame block = **16% of one core** at 160 MHz |
 | EQ cost per band | ~3.2% of a core, so roughly 30 sections before saturating one |
-| Firmware image | ~1.0 MB (needs the large single-app partition; the 1 MB default does not fit) |
+| OLED bus scan | One device ACKs at **0x3C** on SDA 21 / SCL 22 |
+| Full-frame OLED refresh | 1025 bytes at 400 kHz ≈ 21 ms, hence a few Hz refresh |
+| Firmware image | ~1.04 MB (needs the large single-app partition; the 1 MB default does not fit) |
 | Free heap after boot | ~210 kB |
 | Pairing window | Closes at 120.0 s, verified on hardware |
 
@@ -222,9 +286,12 @@ regulator dominate a devkit's draw whatever the firmware does.
 Working: builds, boots, pairs, advertises correctly, AVRCP negotiates, power and
 UI subsystems initialise. Verified on an ESP32-WROOM devkit.
 
-**Not yet verified:** audio actually coming out. No DAC has been connected. The
-I²S configuration, the EQ response and the end-to-end audio path are reasoned
-against the ESP-IDF v5.5.4 driver sources, not heard.
+**Not yet verified:** audio actually coming out, and what the OLED renders. The
+I²C bus and the panel address are confirmed by a scan on real hardware, but the
+glyphs and layout have not been seen. The I²S configuration, the EQ response and
+the end-to-end audio path are reasoned against the ESP-IDF v5.5.4 driver
+sources, not heard. Battery sensing has no cell fitted, so only its
+"not fitted" path runs.
 
 ## Prior art
 

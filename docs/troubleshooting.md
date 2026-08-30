@@ -7,7 +7,7 @@ Ordered roughly by how often each one catches people.
 Work down the chain rather than guessing.
 
 **1. Is the firmware even running?** Watch the serial log. You should see
-`audio_sink: ready: bck=26 ws=25 dout=22` at boot and `stream started` when the
+`audio_sink: ready: bck=4 ws=15 dout=2` at boot and `stream started` when the
 phone plays. If `stream started` never appears, the problem is the Bluetooth
 link, not the audio path — jump to the pairing section.
 
@@ -27,9 +27,17 @@ distorted or channel-swapped audio rather than silence.
 **4. Remember the output is line level.** The PCM5102A is not a headphone
 driver. On 32 Ω headphones it is audible but quiet. Quiet is not broken.
 
-**5. Confirm the GPIOs.** The defaults are BCK 26, LRCK 25, DIN 22. If you wired
+**5. Confirm the GPIOs.** The defaults are BCK 4, LRCK 15, DIN 2. If you wired
 differently, change them in `menuconfig` — the boot log prints what the firmware
-is actually using.
+is actually using:
+
+```
+I (603) audio_sink: ready: bck=4 ws=15 dout=2, 32 kB buffer, prefetch 25%
+```
+
+**6. Check the SCK bridge.** The direct-solder layout runs no MCLK wire, so the
+`SCK` bridge on the front of the PCM5102A must be soldered. Without it the DAC
+has no clock source at all.
 
 ## Distorted, crackly or channel-swapped audio
 
@@ -109,11 +117,71 @@ field (`esp_bluedroid_config_t.ssp_en`), not a build option.
 `.gitattributes` pins LF; run `git add --renormalize .` if it has already
 happened.
 
+## The screen is blank
+
+The boot log answers this before you touch the wiring.
+
+**Nothing at all in the log about the panel** — `PUCK_I2C_SDA_GPIO` or
+`PUCK_I2C_SCL_GPIO` is `-1`, so the display is compiled out of the boot path.
+
+**`no device at 0x3c on SDA=21 SCL=22`** — the driver probed and nothing
+answered. Either the wiring is wrong, or the module is strapped to the other
+address. SSD1306 boards ship at **0x3C or 0x3D** depending on a solder jumper;
+try `PUCK_DISPLAY_I2C_ADDRESS=0x3D`. Check power and ground before the data
+lines — a panel with no 3V3 obviously cannot ACK.
+
+**`128x64 panel at 0x3c` but the screen stays dark** — the bus is fine and the
+panel is answering. That points at the panel itself or its charge pump rather
+than at wiring.
+
+**The self test shows but text does not** — the bus, the panel and the driver
+are all working, and the fault is in rendering. That is exactly why the self
+test exists.
+
+**Text appears but some glyphs are wrong** — that is the font table in
+`components/puck_display/font5x7.c`, one five-byte row per character. It is in
+its own file so a fix is a one-line edit.
+
+**The screen is mirrored or upside down** — the segment remap (`0xA1`) and COM
+scan direction (`0xC8`) in `ssd1306_init` set the orientation. Some modules are
+built the other way round; swap them for `0xA0` and `0xC0`.
+
+## The battery reading looks wrong
+
+**It says `USB`** — `PUCK_BATTERY_ADC_GPIO` is `-1`, the default. That is the
+"not fitted" report, not a failure.
+
+**The percentage is nonsense** — check `PUCK_BATTERY_DIVIDER_RATIO_X100` against
+the resistors you actually fitted. Two equal resistors are `200`. A wrong ratio
+scales every reading.
+
+**`no ADC calibration on this chip`** — that ESP32 has no eFuse calibration
+data. Readings fall back to a nominal scaling and are approximate; nothing is
+broken.
+
+**It moves around during playback** — expected, and partly real. Li-po voltage
+sags under load, and this device draws around 150 mA while streaming. The
+reading is smoothed but the underlying sag is genuine. A voltage-derived
+percentage is an estimate, not a fuel gauge.
+
 ## Flashing and monitoring
 
-**`Could not open COM10, the port is busy`** — something else holds it. A VS
-Code serial monitor, a previous `idf.py monitor`, or a script that did not close
-its handle. Close them and retry.
+**`Wrong boot mode detected (0x13)! The chip needs to be in download mode.`** —
+the board did not auto-reset into the bootloader. **Hold the BOOT button** as
+the flash starts and release it once it begins writing. Some devkits never
+auto-reset reliably, and a DAC loading GPIO 2 makes it worse, since that line is
+both I²S data and a strapping pin.
+
+**`Could not open COMn, the port is busy`** — something else holds it. A VS Code
+serial monitor, a previous `idf.py monitor`, or a script that did not close its
+handle. Close them and retry.
+
+**The port number changed** — a different USB-serial chip enumerates as a
+different port. Check which is present rather than assuming:
+
+```powershell
+[System.IO.Ports.SerialPort]::getportnames()
+```
 
 **`idf.py monitor` hangs a non-interactive shell.** It is interactive by design.
 To capture a log from a script, open the port directly and pulse RTS to reset:
@@ -125,6 +193,8 @@ Start-Sleep -Milliseconds 200; $p.DiscardInBuffer(); $p.RtsEnable = $false
 Start-Sleep -Seconds 5
 $p.ReadExisting(); $p.Close()
 ```
+
+Replace `COM10` with whatever the port scan above reports.
 
 ## Boot loops
 
@@ -139,6 +209,10 @@ To recover a bricked-looking board, hold GPIO 0 low during reset to enter the
 serial bootloader, then flash normally.
 
 ## Measuring what is actually happening
+
+**What is on the I²C bus.** The display driver probes its configured address at
+start-up and logs the result either way, so the boot log already tells you
+whether the panel answered.
 
 **EQ cost.** Enable `PUCK_EQ_BENCHMARK_AT_BOOT` and read the log — it reports
 microseconds per block and the share of one core, with every band forced active.

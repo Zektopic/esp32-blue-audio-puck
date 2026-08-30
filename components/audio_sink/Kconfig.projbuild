@@ -2,24 +2,40 @@ menu "BlueAudio Puck: audio output"
 
     config PUCK_I2S_BCK_GPIO
         int "I2S bit clock (BCK) GPIO"
-        default 26
+        default 4
         range 0 39
         help
             Connects to BCK on the PCM5102A breakout.
 
+            The default follows the layout that lets a PCM5102A board sit
+            directly under an ESP32 devkit with short solder bridges, rather
+            than the pins that are convenient on a breadboard.
+
     config PUCK_I2S_LRCK_GPIO
         int "I2S word select (LRCK) GPIO"
-        default 25
+        default 15
         range 0 39
         help
             Connects to LRCK/LCK on the PCM5102A breakout.
 
+            GPIO 15 is a strapping pin, but only during reset. Driving it as an
+            output afterwards is fine.
+
     config PUCK_I2S_DOUT_GPIO
         int "I2S data out (DIN) GPIO"
-        default 22
+        default 2
         range 0 39
         help
             Connects to DIN on the PCM5102A breakout.
+
+            GPIO 2 is the devkit's on-board LED pin, so the LED now flickers
+            with audio data -- harmless, and the reason PUCK_LED_GPIO defaults
+            to "not fitted". It is also a strapping pin: if the DAC ever holds
+            it high during reset the board will not enter download mode, which
+            is why the reference layout tapes over the unused pin beneath.
+
+            It must not be GPIO 22 on a board with the OLED fitted; that is the
+            I2C clock.
 
     choice PUCK_I2S_SLOT_FORMAT
         prompt "I2S frame format"

@@ -213,7 +213,10 @@ esp_err_t audio_sink_init(void)
         .clk_cfg  = clk_config_for(s_snk.sample_rate_hz),
         .slot_cfg = slot_config_for(s_snk.channels),
         .gpio_cfg = {
-            .mclk = I2S_GPIO_UNUSED,   /* PCM5102A runs from its internal PLL */
+            /* No master clock wire. The PCM5102A derives its own from BCK
+             * once the SCK bridge on the board is soldered, which is what the
+             * direct-solder layout does. */
+            .mclk = I2S_GPIO_UNUSED,
             .bclk = CONFIG_PUCK_I2S_BCK_GPIO,
             .ws   = CONFIG_PUCK_I2S_LRCK_GPIO,
             .dout = CONFIG_PUCK_I2S_DOUT_GPIO,
