@@ -9,6 +9,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "esp_gap_bt_api.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -75,6 +76,38 @@ void bt_core_task_stop(void);
  */
 bool bt_core_dispatch(bt_core_work_t work, uint16_t event, void *params, int param_len,
                       bt_core_copy_t copy, bt_core_free_t dtor);
+
+/** How strong the link to the current source looks. */
+typedef struct {
+    bool   valid;       /*!< false until a reading has come back */
+    int8_t rssi_delta;  /*!< dB relative to the Golden Receive Power Range */
+    uint8_t bars;       /*!< 0..4, for a signal meter */
+} bt_core_link_quality_t;
+
+/**
+ * @brief Start polling link quality for @p bda.
+ *
+ * Call once a source is connected. Polling stops on its own if the reads start
+ * failing, which is what a dropped link looks like from here.
+ */
+void bt_core_link_monitor_start(const uint8_t *bda);
+
+/**
+ * @brief Stop polling and mark the quality unknown.
+ */
+void bt_core_link_monitor_stop(void);
+
+/**
+ * @brief Latest link quality. Cheap; safe from a display refresh.
+ */
+void bt_core_link_quality_get(bt_core_link_quality_t *out);
+
+/**
+ * @brief Feed a GAP event to the link monitor.
+ *
+ * @return true if the event was consumed and the caller should not handle it.
+ */
+bool bt_core_handle_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param);
 
 /**
  * @brief Number of remembered (bonded) sources.

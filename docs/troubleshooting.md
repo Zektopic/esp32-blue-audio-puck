@@ -146,6 +146,23 @@ its own file so a fix is a one-line edit.
 scan direction (`0xC8`) in `ssd1306_init` set the orientation. Some modules are
 built the other way round; swap them for `0xA0` and `0xC0`.
 
+## The signal bars are always full
+
+**That is almost certainly correct.** Bluetooth Classic reports RSSI as a delta
+from the Golden Receive Power Range, not as absolute strength, and zero — a
+healthy link — maps to four bars. The value only goes negative once the link is
+actually struggling, so on a desk next to the phone the meter should be full.
+
+To see it move, walk away from the source until audio starts breaking up.
+
+**The bars never appear at all** — they are drawn only while a source is
+connected. On the pairing and idle screens there is nothing to measure.
+
+**The bars show only their baselines** — a reading has not come back yet, or
+the last read failed. The firmware invalidates the meter rather than showing a
+stale value, so this is what a link in trouble looks like. `PUCK_RSSI_POLL_SECONDS`
+sets how often it asks.
+
 ## The battery reading looks wrong
 
 **It says `USB`** — `PUCK_BATTERY_ADC_GPIO` is `-1`, the default. That is the

@@ -18,6 +18,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
+#include "bt_core.h"
 #include "puck_avrcp.h"
 #include "puck_battery.h"
 #include "puck_display.h"
@@ -42,6 +43,7 @@ typedef struct {
     /* Cached at the slow rate so the fast redraw touches no locks. */
     puck_track_info_t      track;
     puck_battery_reading_t battery;
+    bt_core_link_quality_t link;
     uint8_t                volume;
     bool                   playing;
 
@@ -58,14 +60,27 @@ static void refresh_data(void)
 {
     puck_avrcp_get_track(&s_disp.track);
     puck_battery_get(&s_disp.battery);
+    bt_core_link_quality_get(&s_disp.link);
     s_disp.volume = puck_avrcp_get_volume();
     s_disp.playing = puck_avrcp_is_playing();
 }
 
-/** Top row: what the link is doing on the left, power on the right. */
-static void draw_status_bar(const char *left)
+/**
+ * Top row: signal meter and link state on the left, power on the right.
+ *
+ * @param show_signal  Only when a source is connected. Bars against no link
+ *                     would be meaningless, and an empty meter reads as a
+ *                     fault rather than as "nothing to measure".
+ */
+static void draw_status_bar(const char *left, bool show_signal)
 {
-    gfx_text(s_disp.fb, 0, 0, left, 1, true);
+    int text_x = 0;
+
+    if (show_signal) {
+        gfx_signal_bars(s_disp.fb, 0, 0, s_disp.link.bars, s_disp.link.valid);
+        text_x = SIGNAL_METER_WIDTH + 3;
+    }
+    gfx_text(s_disp.fb, text_x, 0, left, 1, true);
 
     if (s_disp.battery.state == PUCK_BATTERY_ABSENT) {
         /* No divider fitted, so there is nothing to report. Saying "USB" is
@@ -146,7 +161,7 @@ static void draw_scrolling_line(int y, const char *text, int scale, bool animate
 
 static void draw_now_playing(void)
 {
-    draw_status_bar("BT");
+    draw_status_bar("BT", true);
 
     const char *title = s_disp.track.title[0] ? s_disp.track.title : "(no track info)";
     const char *artist = s_disp.track.artist[0] ? s_disp.track.artist : "";
@@ -171,13 +186,13 @@ static void draw_frame(bool animate)
 
     switch (s_disp.screen) {
     case PUCK_SCREEN_PAIRING:
-        draw_status_bar("PAIRING");
+        draw_status_bar("PAIRING", false);
         draw_centred(22, "Ready to", 1);
         draw_centred(34, "pair", 2);
         break;
 
     case PUCK_SCREEN_IDLE:
-        draw_status_bar("IDLE");
+        draw_status_bar("IDLE", false);
         draw_centred(24, CONFIG_PUCK_BT_DEVICE_NAME, 1);
         draw_centred(40, "hold to pair", 1);
         break;

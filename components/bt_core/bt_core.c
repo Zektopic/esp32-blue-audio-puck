@@ -15,6 +15,7 @@
 #include "freertos/task.h"
 
 #include "esp_timer.h"
+#include "esp_bt_defs.h"
 
 #include "esp_bt.h"
 #include "esp_check.h"
@@ -41,6 +42,12 @@ typedef struct {
 
 static QueueHandle_t   s_queue;
 static TaskHandle_t    s_task;
+
+/* Link quality polling. */
+static esp_timer_handle_t    s_rssi_timer;
+static esp_bd_addr_t         s_rssi_peer;
+static bool                  s_rssi_peer_valid;
+static bt_core_link_quality_t s_link;
 static volatile bool   s_task_should_exit;
 static int64_t         s_last_drop_log_us;
 
@@ -183,6 +190,115 @@ bool bt_core_dispatch(bt_core_work_t work, uint16_t event, void *params, int par
         }
         bt_core_msg_release(&msg);
         return false;
+    }
+    return true;
+}
+
+/**
+ * Turn an RSSI delta into a four-bar meter.
+ *
+ * BR/EDR does not report absolute signal strength. It reports how far the
+ * receiver sits from the Golden Receive Power Range -- the window the
+ * controller is trying to keep the link inside -- so **zero means healthy**,
+ * not absent. A link in good shape reads 0 most of the time, and the meter
+ * sits full; the numbers only go negative once the link is genuinely
+ * struggling, which is exactly when a signal indicator earns its place.
+ *
+ * The thresholds are judgement, not a specification. Treat the meter as
+ * "fine / getting worse / about to drop out", not as dBm.
+ */
+static uint8_t bars_from_delta(int8_t delta)
+{
+    if (delta >= 0) {
+        return 4;   /* inside or above the golden range */
+    }
+    if (delta >= -5) {
+        return 3;
+    }
+    if (delta >= -15) {
+        return 2;
+    }
+    if (delta >= -30) {
+        return 1;
+    }
+    return 0;
+}
+
+static void rssi_poll_cb(void *arg)
+{
+    (void)arg;
+    if (!s_rssi_peer_valid) {
+        return;
+    }
+    /* Runs on the esp_timer task, not in an ISR, so calling into Bluedroid is
+     * fine. The answer arrives later as a GAP event. */
+    const esp_err_t err = esp_bt_gap_read_rssi_delta(s_rssi_peer);
+    if (err != ESP_OK) {
+        ESP_LOGD(TAG, "RSSI request failed: %s", esp_err_to_name(err));
+    }
+}
+
+void bt_core_link_monitor_start(const uint8_t *bda)
+{
+    if (bda == NULL) {
+        return;
+    }
+    memcpy(s_rssi_peer, bda, sizeof(s_rssi_peer));
+    s_rssi_peer_valid = true;
+    s_link.valid = false;
+
+    if (s_rssi_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = rssi_poll_cb,
+            .name = "rssi",
+            .dispatch_method = ESP_TIMER_TASK,
+        };
+        if (esp_timer_create(&args, &s_rssi_timer) != ESP_OK) {
+            ESP_LOGW(TAG, "link monitor timer create failed");
+            return;
+        }
+    }
+    esp_timer_stop(s_rssi_timer);
+    esp_timer_start_periodic(s_rssi_timer,
+                             (uint64_t)CONFIG_PUCK_RSSI_POLL_SECONDS * 1000000ULL);
+
+    /* Ask immediately so the meter is populated before the first tick. */
+    rssi_poll_cb(NULL);
+}
+
+void bt_core_link_monitor_stop(void)
+{
+    if (s_rssi_timer != NULL) {
+        esp_timer_stop(s_rssi_timer);
+    }
+    s_rssi_peer_valid = false;
+    s_link.valid = false;
+    s_link.bars = 0;
+}
+
+void bt_core_link_quality_get(bt_core_link_quality_t *out)
+{
+    if (out != NULL) {
+        *out = s_link;
+    }
+}
+
+bool bt_core_handle_gap_event(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
+{
+    if (event != ESP_BT_GAP_READ_RSSI_DELTA_EVT) {
+        return false;
+    }
+
+    if (param->read_rssi_delta.stat == ESP_BT_STATUS_SUCCESS) {
+        s_link.rssi_delta = param->read_rssi_delta.rssi_delta;
+        s_link.bars = bars_from_delta(s_link.rssi_delta);
+        s_link.valid = true;
+        ESP_LOGD(TAG, "link rssi delta %d dB -> %u bars", s_link.rssi_delta, s_link.bars);
+    } else {
+        /* A failed read usually means the link is gone or going. Showing the
+         * last good value would be worse than showing nothing. */
+        s_link.valid = false;
+        s_link.bars = 0;
     }
     return true;
 }

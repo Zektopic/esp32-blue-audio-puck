@@ -1,0 +1,18 @@
+menu "BlueAudio Puck: link monitoring"
+
+    config PUCK_RSSI_POLL_SECONDS
+        int "Seconds between link quality reads"
+        default 3
+        range 1 60
+        help
+            How often the puck asks the controller how the link is doing, so
+            the signal meter can move.
+
+            Bluetooth Classic does not report absolute signal strength. It
+            reports a delta from the Golden Receive Power Range, so zero means
+            "healthy", not "no signal". A good link reads zero and the meter
+            sits full; the value only goes negative once the link is actually
+            struggling. Treat the bars as fine / getting worse / about to drop
+            out, not as dBm.
+
+endmenu
