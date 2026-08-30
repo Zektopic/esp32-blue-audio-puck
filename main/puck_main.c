@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "esp_a2dp_api.h"
+#include "esp_avrc_api.h"
 #include "esp_bt_device.h"
 #include "esp_chip_info.h"
 #include "esp_flash.h"
@@ -26,6 +27,7 @@
 #include "audio_sink.h"
 #include "bt_core.h"
 #include "puck_avrcp.h"
+#include "puck_ui.h"
 
 static const char *TAG = "puck";
 
@@ -37,6 +39,52 @@ enum {
 
 static const char *const s_conn_state[] = {"disconnected", "connecting", "connected", "disconnecting"};
 static const char *const s_audio_state[] = {"suspended", "started"};
+
+/*
+ * Re-open the puck to new sources.
+ *
+ * Dropping the current link first is deliberate: a source that is already
+ * connected will usually reconnect instantly, which would leave the user
+ * staring at a pairing light that never finds their other phone.
+ */
+static void enter_pairing_mode(void)
+{
+    ESP_LOGI(TAG, "entering pairing mode");
+    esp_a2d_sink_disconnect(NULL);
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    puck_ui_set_state(PUCK_UI_PAIRING);
+}
+
+/* Runs on the UI task. */
+static void on_gesture(puck_ui_gesture_t gesture)
+{
+    switch (gesture) {
+    case PUCK_UI_PRESS_SINGLE:
+        /* One button, so play and pause share it: ask for whichever the
+         * source is not currently doing. */
+        ESP_ERROR_CHECK_WITHOUT_ABORT(
+            puck_avrcp_send_key(puck_avrcp_is_playing() ? ESP_AVRC_PT_CMD_PAUSE
+                                                        : ESP_AVRC_PT_CMD_PLAY));
+        break;
+    case PUCK_UI_PRESS_DOUBLE:
+        ESP_ERROR_CHECK_WITHOUT_ABORT(puck_avrcp_send_key(ESP_AVRC_PT_CMD_FORWARD));
+        break;
+    case PUCK_UI_PRESS_TRIPLE:
+        ESP_ERROR_CHECK_WITHOUT_ABORT(puck_avrcp_send_key(ESP_AVRC_PT_CMD_BACKWARD));
+        break;
+    case PUCK_UI_PRESS_LONG:
+        enter_pairing_mode();
+        break;
+    case PUCK_UI_VOLUME_UP:
+        puck_avrcp_adjust_volume(CONFIG_PUCK_VOLUME_STEP);
+        break;
+    case PUCK_UI_VOLUME_DOWN:
+        puck_avrcp_adjust_volume(-CONFIG_PUCK_VOLUME_STEP);
+        break;
+    default:
+        break;
+    }
+}
 
 /* Runs on the application task, via AVRCP. */
 static void on_track_change(const puck_track_info_t *info)
@@ -95,9 +143,11 @@ static void handle_a2dp_event(uint16_t event, void *param)
              * served anyway, and staying discoverable wastes radio time. */
             esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
+            puck_ui_set_state(PUCK_UI_CONNECTED);
         } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_stop());
             esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+            puck_ui_set_state(PUCK_UI_PAIRING);
         }
         break;
     }
@@ -107,6 +157,9 @@ static void handle_a2dp_event(uint16_t event, void *param)
         ESP_LOGI(TAG, "stream %s", s_audio_state[state]);
         if (state == ESP_A2D_AUDIO_STATE_STARTED) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
+            puck_ui_set_state(PUCK_UI_PLAYING);
+        } else {
+            puck_ui_set_state(PUCK_UI_CONNECTED);
         }
         break;
     }
@@ -157,6 +210,7 @@ static void handle_stack_up(uint16_t event, void *param)
                        ESP_BT_SET_COD_ALL);
 
     ESP_ERROR_CHECK(esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE));
+    puck_ui_set_state(PUCK_UI_PAIRING);
     ESP_LOGI(TAG, "discoverable as \"%s\"", CONFIG_PUCK_BT_DEVICE_NAME);
 }
 
@@ -245,6 +299,9 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_sink_init());
     ESP_ERROR_CHECK(audio_dsp_init(44100));
     audio_sink_set_processor(audio_dsp_process);
+
+    ESP_ERROR_CHECK(puck_ui_init());
+    puck_ui_set_gesture_cb(on_gesture);
 
     ESP_ERROR_CHECK(bt_core_stack_init());
     ESP_ERROR_CHECK(bt_core_task_start());

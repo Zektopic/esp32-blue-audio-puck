@@ -1,0 +1,49 @@
+menu "BlueAudio Puck: buttons and LED"
+
+    config PUCK_BUTTON_GPIO
+        int "Main button GPIO (-1 if not fitted)"
+        default 33
+        range -1 39
+        help
+            Wired to ground through the switch; the internal pull-up holds it
+            high when open. GPIO 33 is also an RTC pin, so it can wake the chip
+            from deep sleep later.
+
+    config PUCK_VOLUME_UP_GPIO
+        int "Volume up button GPIO (-1 if not fitted)"
+        default -1
+        range -1 39
+        help
+            Optional. Volume normally comes from the phone over AVRCP, so this
+            is only needed if you want the puck itself to have volume keys.
+
+    config PUCK_VOLUME_DOWN_GPIO
+        int "Volume down button GPIO (-1 if not fitted)"
+        default -1
+        range -1 39
+
+    config PUCK_LED_GPIO
+        int "Status LED GPIO (-1 if not fitted)"
+        default 2
+        range -1 33
+        help
+            Driven by LEDC PWM so the LED can breathe and dim rather than only
+            blink. GPIO 2 is the on-board LED of most ESP32 devkits. Must be an
+            output-capable pin: GPIO 34-39 are input only.
+
+    config PUCK_LED_ACTIVE_LOW
+        bool "Status LED is active low"
+        default n
+        help
+            Enable if the LED is wired between the pin and 3V3 rather than
+            between the pin and ground.
+
+    config PUCK_VOLUME_STEP
+        int "Volume change per button press"
+        default 8
+        range 1 32
+        help
+            In AVRCP units, where full scale is 127. 8 gives 16 steps across
+            the range.
+
+endmenu
