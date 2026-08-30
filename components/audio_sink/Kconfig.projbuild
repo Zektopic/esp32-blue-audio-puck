@@ -54,11 +54,17 @@ menu "BlueAudio Puck: audio output"
 
     config PUCK_AUDIO_PREFETCH_PERCENT
         int "Prefetch level before playback starts (% of buffer)"
-        default 60
-        range 20 90
+        default 25
+        range 10 90
         help
             Playback waits until the buffer is this full, then runs until it is
-            empty. A higher value stutters less and adds latency.
+            empty, so this is also what every underrun costs to rebuild.
+
+            At the 32 kB default, 25% is about 46 ms -- comfortably above the
+            33 ms the I2S DMA chain already holds, and above typical BR/EDR
+            retry windows. The old 60% was 111 ms, which meant an audible 78 ms
+            gap after every underrun and enough added latency to break lip-sync
+            on video.
 
     config PUCK_AUDIO_WRITER_CORE
         int "CPU core for the I2S writer task"
