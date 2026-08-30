@@ -1,0 +1,40 @@
+menu "BlueAudio Puck: power"
+
+    config PUCK_BT_TX_POWER_LEVEL
+        int "Bluetooth transmit power level (0=-12dBm .. 7=+9dBm)"
+        default 4
+        range 0 7
+        help
+            Caps the radio's transmit power. The source is usually in the same
+            pocket, so the top of the range spends current on range nobody is
+            using. Raise it if the puck lives in a bag with the phone across
+            the room. 4 is 0 dBm.
+
+    config PUCK_CPU_MAX_FREQ_MHZ
+        int "Maximum CPU frequency (MHz)"
+        default 160
+        range 80 240
+        help
+            SBC decode plus a handful of biquads fits comfortably at 160 MHz.
+            240 buys headroom for more DSP at a noticeable current cost.
+
+    config PUCK_CPU_MIN_FREQ_MHZ
+        int "Minimum CPU frequency (MHz)"
+        default 80
+        range 10 240
+        help
+            Floor the CPU drops to when nothing needs the cycles. Only has an
+            effect when frequency scaling is compiled in.
+
+    config PUCK_IDLE_SLEEP_MINUTES
+        int "Deep sleep after this many idle minutes (0 disables)"
+        default 15
+        range 0 240
+        help
+            Counts only while nothing is connected. A connected but paused
+            source never triggers it -- a puck that vanishes from under a
+            paused phone is worse than a flat one. This does not extend
+            playback at all; it is what stops the puck going flat overnight in
+            a bag.
+
+endmenu

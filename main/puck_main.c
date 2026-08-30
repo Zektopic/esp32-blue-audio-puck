@@ -27,6 +27,7 @@
 #include "audio_sink.h"
 #include "bt_core.h"
 #include "puck_avrcp.h"
+#include "puck_power.h"
 #include "puck_ui.h"
 
 static const char *TAG = "puck";
@@ -58,6 +59,9 @@ static void enter_pairing_mode(void)
 /* Runs on the UI task. */
 static void on_gesture(puck_ui_gesture_t gesture)
 {
+    /* Any deliberate interaction is a reason not to shut down yet. */
+    puck_power_kick();
+
     switch (gesture) {
     case PUCK_UI_PRESS_SINGLE:
         /* One button, so play and pause share it: ask for whichever the
@@ -144,10 +148,12 @@ static void handle_a2dp_event(uint16_t event, void *param)
             esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
             puck_ui_set_state(PUCK_UI_CONNECTED);
+            puck_power_set_activity(PUCK_POWER_LINKED);
         } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_stop());
             esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
             puck_ui_set_state(PUCK_UI_PAIRING);
+            puck_power_set_activity(PUCK_POWER_IDLE);
         }
         break;
     }
@@ -158,8 +164,10 @@ static void handle_a2dp_event(uint16_t event, void *param)
         if (state == ESP_A2D_AUDIO_STATE_STARTED) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
             puck_ui_set_state(PUCK_UI_PLAYING);
+            puck_power_set_activity(PUCK_POWER_STREAMING);
         } else {
             puck_ui_set_state(PUCK_UI_CONNECTED);
+            puck_power_set_activity(PUCK_POWER_LINKED);
         }
         break;
     }
@@ -305,6 +313,10 @@ void app_main(void)
 
     ESP_ERROR_CHECK(bt_core_stack_init());
     ESP_ERROR_CHECK(bt_core_task_start());
+
+    /* After the controller is up: transmit power and controller sleep can
+     * only be set on a running controller. */
+    ESP_ERROR_CHECK(puck_power_init());
 
     puck_avrcp_set_track_cb(on_track_change);
 
