@@ -17,6 +17,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/ringbuf.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "driver/i2s_std.h"
@@ -31,9 +32,30 @@ static const char *TAG = "audio_sink";
 #define RINGBUF_BYTES      (CONFIG_PUCK_AUDIO_RINGBUF_KB * 1024)
 #define PREFETCH_BYTES     ((RINGBUF_BYTES / 100) * CONFIG_PUCK_AUDIO_PREFETCH_PERCENT)
 
-/* The I2S DMA holds dma_desc_num * dma_frame_num frames. Handing it a similar
- * amount per write keeps the descriptor chain busy without long blocking. */
-#define WRITE_CHUNK_BYTES  (240 * 6)
+/* The default I2S DMA chain is dma_desc_num(6) x dma_frame_num(240) = 1440
+ * frames = 5760 bytes at 16-bit stereo. A write of a quarter of that keeps the
+ * descriptors fed while bounding how long a single write can block: one
+ * descriptor drains in 240/44100 = 5.44 ms. */
+#define WRITE_CHUNK_BYTES  1440
+
+/* How long a write may wait for a free DMA descriptor.
+ *
+ * NOT portMAX_DELAY. i2s_channel_write() takes MILLISECONDS and feeds them to
+ * pdMS_TO_TICKS, which is 32-bit: portMAX_DELAY overflows to roughly twelve
+ * hours. On a disabled channel the write blocks on a semaphore that only
+ * i2s_channel_enable() ever gives, so a writer that entered the call just
+ * after a stop would wedge for half a day holding a ring buffer item. The IDF
+ * example has exactly this bug. 100 ms is ~18x the descriptor period, so
+ * normal playback never reaches it. */
+#define WRITE_TIMEOUT_MS   100
+
+/* Interleaved 16-bit stereo frames are 4 bytes. If either of these stopped
+ * being a multiple of 4, a ring buffer wrap could hand back a frame-straddling
+ * block and the DSP would silently swap left and right for the rest of the
+ * stream. */
+_Static_assert(WRITE_CHUNK_BYTES % 4 == 0, "chunk must hold whole stereo frames");
+_Static_assert((CONFIG_PUCK_AUDIO_RINGBUF_KB * 1024) % 4 == 0,
+               "ring buffer must hold whole stereo frames");
 
 #define WRITER_TASK_STACK  3072
 /* Just below the Bluetooth stack task, so audio is served promptly but never
@@ -53,6 +75,7 @@ typedef struct {
     i2s_chan_handle_t       tx;
     RingbufHandle_t         ringbuf;
     TaskHandle_t            writer;
+    SemaphoreHandle_t       parked;    /*!< given while the writer holds nothing */
     volatile bool           running;   /*!< I2S channel enabled */
     volatile ringbuf_mode_t mode;
     volatile int32_t        gain_q15;  /*!< playback gain, GAIN_UNITY == 0 dB */
@@ -110,9 +133,17 @@ static void writer_task(void *arg)
 
     for (;;) {
         /* Park while stopped or while the cushion refills. Waking on a
-         * notification costs less than polling an idle ring buffer. */
+         * notification costs less than polling an idle ring buffer.
+         *
+         * The parked semaphore is what lets audio_sink_stop() know the writer
+         * holds no ring buffer item, so it can safely disable the channel and
+         * flush. The timeout is a backstop: every state that should run has a
+         * notification, but a missed one would otherwise be permanent silence
+         * rather than a 100 ms hiccup. */
         if (!s_snk.running || s_snk.mode == RB_PREFETCHING) {
-            ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+            xSemaphoreGive(s_snk.parked);
+            ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
+            xSemaphoreTake(s_snk.parked, 0);
             continue;
         }
 
@@ -135,7 +166,10 @@ static void writer_task(void *arg)
          * scale where it has the most headroom, and attenuation comes last. */
         const audio_sink_process_cb_t processor = s_snk.processor;
         if (processor != NULL) {
-            processor((int16_t *)data, chunk / sizeof(int16_t), s_snk.channels);
+            /* Read once: a format change mid-block would otherwise swap which
+             * filter state each sample belongs to, halfway through. */
+            const uint8_t channels = s_snk.channels;
+            processor((int16_t *)data, chunk / sizeof(int16_t), channels);
         }
 
         /* Read once: the AVRCP task can change this mid-block, and a torn
@@ -146,10 +180,13 @@ static void writer_task(void *arg)
         }
 
         size_t written = 0;
-        esp_err_t err = i2s_channel_write(s_snk.tx, data, chunk, &written, portMAX_DELAY);
+        esp_err_t err = i2s_channel_write(s_snk.tx, data, chunk, &written, WRITE_TIMEOUT_MS);
         vRingbufferReturnItem(s_snk.ringbuf, data);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "i2s write failed: %s", esp_err_to_name(err));
+        if (err != ESP_OK && s_snk.running) {
+            /* A timeout or a disabled channel while stopping is expected; the
+             * loop re-reads the state on the next pass either way. */
+            ESP_LOGD(TAG, "i2s write returned %s (%u of %u bytes)",
+                     esp_err_to_name(err), (unsigned)written, (unsigned)chunk);
         }
     }
 }
@@ -191,6 +228,10 @@ esp_err_t audio_sink_init(void)
     ESP_GOTO_ON_FALSE(s_snk.ringbuf != NULL, ESP_ERR_NO_MEM, err, TAG,
                       "ring buffer alloc failed (%d bytes)", RINGBUF_BYTES);
 
+    s_snk.parked = xSemaphoreCreateBinary();
+    ESP_GOTO_ON_FALSE(s_snk.parked != NULL, ESP_ERR_NO_MEM, err, TAG,
+                      "parked semaphore alloc failed");
+
     ESP_GOTO_ON_FALSE(xTaskCreatePinnedToCore(writer_task, "i2s_writer", WRITER_TASK_STACK,
                                               NULL, WRITER_TASK_PRIO, &s_snk.writer,
                                               CONFIG_PUCK_AUDIO_WRITER_CORE) == pdPASS,
@@ -224,6 +265,10 @@ void audio_sink_deinit(void)
         vRingbufferDelete(s_snk.ringbuf);
         s_snk.ringbuf = NULL;
     }
+    if (s_snk.parked != NULL) {
+        vSemaphoreDelete(s_snk.parked);
+        s_snk.parked = NULL;
+    }
 }
 
 esp_err_t audio_sink_start(void)
@@ -236,6 +281,10 @@ esp_err_t audio_sink_start(void)
     ESP_RETURN_ON_ERROR(i2s_channel_enable(s_snk.tx), TAG, "i2s enable failed");
     s_snk.running = true;
     s_snk.mode = RB_PREFETCHING;
+    /* Wake the writer even though it will find the buffer empty and park
+     * again: without this, the states reachable from here have no wakeup
+     * source at all if the buffer is already above the prefetch level. */
+    xTaskNotifyGive(s_snk.writer);
     ESP_LOGI(TAG, "output started at %" PRIu32 " Hz, %u ch",
              s_snk.sample_rate_hz, s_snk.channels);
     return ESP_OK;
@@ -250,12 +299,24 @@ esp_err_t audio_sink_stop(void)
 
     s_snk.running = false;
     s_snk.mode = RB_PREFETCHING;
-    /* Nudge the writer so it parks instead of blocking on a channel that is
-     * about to be disabled. */
     xTaskNotifyGive(s_snk.writer);
+
+    /* Wait for the writer to reach its park point before touching the channel
+     * or the buffer. It bounds at WRITE_TIMEOUT_MS plus a pass of the loop. */
+    if (xSemaphoreTake(s_snk.parked, pdMS_TO_TICKS(WRITE_TIMEOUT_MS + 100)) != pdTRUE) {
+        ESP_LOGW(TAG, "writer did not park in time; flush skipped");
+    } else {
+        xSemaphoreGive(s_snk.parked);
+    }
+
     ESP_RETURN_ON_ERROR(i2s_channel_disable(s_snk.tx), TAG, "i2s disable failed");
 
-    /* Stale audio from the previous stream would otherwise play on resume. */
+    /* Stale audio from the previous stream would otherwise play on resume --
+     * at the new rate, if the stop was for a format change.
+     *
+     * This only works because the writer is parked. A byte-mode ring buffer
+     * refuses a second retrieval while one is outstanding, so doing this while
+     * the writer held an item failed silently and flushed nothing. */
     size_t stale = 0;
     void *item = NULL;
     while ((item = xRingbufferReceiveUpTo(s_snk.ringbuf, &stale, 0, WRITE_CHUNK_BYTES)) != NULL) {
@@ -336,6 +397,13 @@ size_t audio_sink_write(const uint8_t *data, size_t size)
         return 0;
     }
 
+    /* Refuse audio while the output is stopped. Accepting it filled the buffer
+     * during a stop or a format change, and a full buffer plus a parked writer
+     * is a state nothing recovers from. */
+    if (!s_snk.running) {
+        return 0;
+    }
+
     size_t buffered = 0;
     vRingbufferGetInfo(s_snk.ringbuf, NULL, NULL, NULL, NULL, &buffered);
 
@@ -345,6 +413,9 @@ size_t audio_sink_write(const uint8_t *data, size_t size)
         s_snk.stats.dropped++;
         if (buffered <= PREFETCH_BYTES) {
             s_snk.mode = RB_PLAYING;
+            /* This edge had no wakeup either: leaving drop mode with a parked
+             * writer left the buffer full forever. */
+            xTaskNotifyGive(s_snk.writer);
         }
         return 0;
     }

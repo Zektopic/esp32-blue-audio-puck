@@ -339,10 +339,16 @@ static void gap_event_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *par
             ESP_LOGW(TAG, "pairing failed, status %d", param->auth_cmpl.stat);
         }
         break;
-    case ESP_BT_GAP_MODE_CHG_EVT:
-        ESP_LOGI(TAG, "link power mode %d, interval %.2f ms",
-                 param->mode_chg.mode, param->mode_chg.interval * 0.625);
+    case ESP_BT_GAP_MODE_CHG_EVT: {
+        /* Integer arithmetic on purpose: this runs on the Bluetooth stack task,
+         * and printf's float path costs several hundred bytes of a stack this
+         * code does not own, and drags the FPU into a task that otherwise never
+         * touches it. The interval is in 0.625 ms slots. */
+        const uint32_t interval_us = (uint32_t)param->mode_chg.interval * 625u;
+        ESP_LOGI(TAG, "link power mode %d, interval %" PRIu32 ".%02" PRIu32 " ms",
+                 param->mode_chg.mode, interval_us / 1000u, (interval_us % 1000u) / 10u);
         break;
+    }
     case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
         ESP_LOGI(TAG, "ACL closed with [%s], reason 0x%x",
                  bt_core_bda_str(param->acl_disconn_cmpl_stat.bda, bda, sizeof(bda)),

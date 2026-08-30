@@ -41,7 +41,26 @@ typedef struct {
     uint32_t         sample_rate_hz;
     volatile bool    enabled;
     audio_dsp_band_t bands[AUDIO_DSP_BANDS];
-    biquad_coeffs_t  coeffs[AUDIO_DSP_BANDS];
+
+    /*
+     * Coefficients are double buffered and published by flipping an index.
+     *
+     * A biquad_coeffs_t is five floats plus a flag. No amount of `volatile`
+     * makes a 24-byte struct update atomic, so a writer reading it per sample
+     * while the application task rewrites it in place can observe a half
+     * published section. That is not a glitch that passes: a torn (a1, a2)
+     * pair can put the poles outside the unit circle, and a recursive filter
+     * with unstable poles grows until saturation turns it into a full-scale
+     * square wave that persists long after the coefficients are consistent.
+     *
+     * The application task fills the inactive set, then flips. The writer
+     * reads the index once per block. Cost in the inner loop: nothing.
+     */
+    biquad_coeffs_t  sets[2][AUDIO_DSP_BANDS];
+    volatile uint8_t active;          /*!< which set the writer reads */
+    volatile bool    reset_pending;   /*!< writer clears its own state */
+
+    /* Owned exclusively by the audio writer task. */
     biquad_state_t   state[MAX_CHANNELS][AUDIO_DSP_BANDS];
 } audio_dsp_t;
 
@@ -118,16 +137,29 @@ static void compute_coeffs(const audio_dsp_band_t *band, uint32_t sample_rate_hz
     out->bypass = false;
 }
 
-static void recompute_all(void)
+/**
+ * Recompute every section into the inactive set and publish it atomically.
+ *
+ * @param reset_state  Ask the writer to clear its filter state, which it must
+ *                     do whenever the response changes enough that the old
+ *                     state no longer belongs to it.
+ */
+static void publish_coeffs(bool reset_state)
 {
-    for (size_t i = 0; i < AUDIO_DSP_BANDS; i++) {
-        compute_coeffs(&s_dsp.bands[i], s_dsp.sample_rate_hz, &s_dsp.coeffs[i]);
-    }
-}
+    const uint8_t next = s_dsp.active ^ 1u;
 
-static void clear_state(void)
-{
-    memset(s_dsp.state, 0, sizeof(s_dsp.state));
+    for (size_t i = 0; i < AUDIO_DSP_BANDS; i++) {
+        compute_coeffs(&s_dsp.bands[i], s_dsp.sample_rate_hz, &s_dsp.sets[next][i]);
+    }
+
+    /* Everything above must land before the index flip below, or the writer
+     * can follow the new index to a set that is still being written. */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    s_dsp.active = next;
+
+    if (reset_state) {
+        s_dsp.reset_pending = true;
+    }
 }
 
 esp_err_t audio_dsp_init(uint32_t sample_rate_hz)
@@ -153,8 +185,10 @@ esp_err_t audio_dsp_init(uint32_t sample_rate_hz)
         s_dsp.bands[AUDIO_DSP_BANDS - 1].type = AUDIO_DSP_HIGH_SHELF;
     }
 
-    recompute_all();
-    clear_state();
+    /* Populate both sets so the very first block reads a complete one. */
+    publish_coeffs(true);
+    publish_coeffs(true);
+    memset(s_dsp.state, 0, sizeof(s_dsp.state));
 #ifdef CONFIG_PUCK_EQ_ENABLED_AT_BOOT
     s_dsp.enabled = true;
 #else
@@ -174,9 +208,8 @@ esp_err_t audio_dsp_set_sample_rate(uint32_t sample_rate_hz)
         return ESP_OK;
     }
     s_dsp.sample_rate_hz = sample_rate_hz;
-    recompute_all();
     /* Old state belongs to the old rate; carrying it over would ring. */
-    clear_state();
+    publish_coeffs(true);
     ESP_LOGI(TAG, "coefficients recomputed for %" PRIu32 " Hz", sample_rate_hz);
     return ESP_OK;
 }
@@ -188,10 +221,12 @@ esp_err_t audio_dsp_set_band(size_t index, const audio_dsp_band_t *band)
     ESP_RETURN_ON_FALSE(band != NULL, ESP_ERR_INVALID_ARG, TAG, "null band");
 
     s_dsp.bands[index] = *band;
-    compute_coeffs(&s_dsp.bands[index], s_dsp.sample_rate_hz, &s_dsp.coeffs[index]);
+    /* Republish the whole set rather than editing one section in place: the
+     * writer must never see a set that is part old and part new. */
+    publish_coeffs(false);
     ESP_LOGI(TAG, "band %u: %.0f Hz, Q %.2f, %+.1f dB%s", (unsigned)index,
              band->freq_hz, band->q, band->gain_db,
-             s_dsp.coeffs[index].bypass ? " (flat)" : "");
+             s_dsp.sets[s_dsp.active][index].bypass ? " (flat)" : "");
     return ESP_OK;
 }
 
@@ -206,8 +241,9 @@ esp_err_t audio_dsp_get_band(size_t index, audio_dsp_band_t *out)
 void audio_dsp_set_enabled(bool enabled)
 {
     if (enabled && !s_dsp.enabled) {
-        /* Starting from stale state would produce a transient. */
-        clear_state();
+        /* Starting from stale state would produce a transient. Ask the writer
+         * to do it -- the state is its alone. */
+        s_dsp.reset_pending = true;
     }
     s_dsp.enabled = enabled;
     ESP_LOGI(TAG, "equaliser %s", enabled ? "on" : "off");
@@ -223,12 +259,11 @@ void audio_dsp_reset(void)
     for (size_t i = 0; i < AUDIO_DSP_BANDS; i++) {
         s_dsp.bands[i].gain_db = 0.0f;
     }
-    recompute_all();
-    clear_state();
+    publish_coeffs(true);
     ESP_LOGI(TAG, "equaliser reset to flat");
 }
 
-/** Round and clamp back into int16, so a boosted band wraps to nothing. */
+/** Round and clamp back into int16, so a boosted band clips instead of wrapping. */
 static inline int16_t saturate(float sample)
 {
     if (sample > 32767.0f) {
@@ -237,7 +272,10 @@ static inline int16_t saturate(float sample)
     if (sample < -32768.0f) {
         return -32768;
     }
-    return (int16_t)sample;
+    /* Round rather than truncate. A cast toward zero biases every sample by up
+     * to half an LSB, which across a whole stream is a small DC-ish distortion
+     * for no reason: lrintf is a single instruction here. */
+    return (int16_t)lrintf(sample);
 }
 
 void audio_dsp_process(int16_t *samples, size_t count, uint8_t channels)
@@ -249,6 +287,17 @@ void audio_dsp_process(int16_t *samples, size_t count, uint8_t channels)
         return;
     }
 
+    /* Read the published set once per block. Re-reading it per sample is what
+     * would let a coefficient update tear across the middle of a waveform. */
+    const uint8_t set_index = s_dsp.active;
+    __atomic_thread_fence(__ATOMIC_ACQUIRE);
+    const biquad_coeffs_t *const coeffs = s_dsp.sets[set_index];
+
+    if (s_dsp.reset_pending) {
+        s_dsp.reset_pending = false;
+        memset(s_dsp.state, 0, sizeof(s_dsp.state));
+    }
+
     /* Walk whole frames with a running index. Deriving the channel with
      * `i % channels` would put an integer division in the innermost audio
      * loop, which is the one place it cannot be afforded. */
@@ -258,7 +307,7 @@ void audio_dsp_process(int16_t *samples, size_t count, uint8_t channels)
             float x = (float)samples[i];
 
             for (size_t b = 0; b < AUDIO_DSP_BANDS; b++) {
-                const biquad_coeffs_t *c = &s_dsp.coeffs[b];
+                const biquad_coeffs_t *c = &coeffs[b];
                 if (c->bypass) {
                     continue;
                 }
