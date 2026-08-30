@@ -1,0 +1,19 @@
+# BlueAudio Puck -- project-wide configuration defaults.
+#
+# Regenerate a working sdkconfig with:  idf.py set-target esp32 && idf.py build
+# `sdkconfig` itself is gitignored; this file is the source of truth.
+
+# --- Target -----------------------------------------------------------------
+CONFIG_IDF_TARGET="esp32"
+
+# --- Partitioning -----------------------------------------------------------
+# The Bluedroid Classic stack pushes the image past the 1 MB default factory
+# partition, so use the large single-app layout from the start.
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
+# --- Serial monitor ---------------------------------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096
+
+# --- Logging ----------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y

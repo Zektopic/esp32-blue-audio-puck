@@ -1,53 +1,125 @@
-| Supported Targets | ESP32 | ESP32-C2 | ESP32-C3 | ESP32-C5 | ESP32-C6 | ESP32-C61 | ESP32-H2 | ESP32-H21 | ESP32-H4 | ESP32-P4 | ESP32-S2 | ESP32-S3 | Linux |
-| ----------------- | ----- | -------- | -------- | -------- | -------- | --------- | -------- | --------- | -------- | -------- | -------- | -------- | ----- |
+# BlueAudio Puck
 
-# Hello World Example
+A pocket-sized **Bluetooth audio receiver**: it pairs with a phone or computer as
+an A2DP sink, decodes the stream on an ESP32, and pushes the PCM out over I²S to
+an external DAC and headphone amplifier feeding a 3.5 mm jack. Wired headphones,
+wirelessly.
 
-Starts a FreeRTOS task to print "Hello World".
+> **Target silicon: the original ESP32 only.**
+> A2DP rides on Bluetooth Classic (BR/EDR), which Espressif removed from the
+> ESP32-S3 and ESP32-C3. Those parts are BLE-only and cannot run this firmware.
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+## Signal chain
 
-## How to use example
+```mermaid
+flowchart LR
+    SRC["Phone / PC<br/><i>A2DP source</i>"]
+    subgraph PUCK["BlueAudio Puck"]
+        direction LR
+        BT["ESP32<br/>Bluedroid A2DP sink<br/>SBC decode"]
+        DSP["Ring buffer<br/>+ volume / EQ"]
+        DAC["PCM5102A<br/>I²S DAC"]
+        AMP["Headphone amp"]
+    end
+    JACK["3.5 mm<br/>headphones"]
 
-Follow detailed instructions provided specifically for this example.
-
-Select the instructions depending on Espressif chip installed on your development board:
-
-- [ESP32 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/stable/get-started/index.html)
-- [ESP32-S2 Getting Started Guide](https://docs.espressif.com/projects/esp-idf/en/latest/esp32s2/get-started/index.html)
-
-
-## Example folder contents
-
-The project **hello_world** contains one source file in C language [hello_world_main.c](main/hello_world_main.c). The file is located in folder [main](main).
-
-ESP-IDF projects are built using CMake. The project build configuration is contained in `CMakeLists.txt` files that provide set of directives and instructions describing the project's source files and targets (executable, library, or both).
-
-Below is short explanation of remaining files in the project folder.
-
-```
-├── CMakeLists.txt
-├── pytest_hello_world.py      Python script used for automated testing
-├── main
-│   ├── CMakeLists.txt
-│   └── hello_world_main.c
-└── README.md                  This is the file you are currently reading
+    SRC -- "Bluetooth Classic" --> BT
+    BT -- "PCM frames" --> DSP
+    DSP -- "I²S" --> DAC
+    DAC -- "line level" --> AMP
+    AMP --> JACK
 ```
 
-For more information on structure and contents of ESP-IDF projects, please refer to Section [Build System](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-guides/build-system.html) of the ESP-IDF Programming Guide.
+## Firmware architecture
 
-## Troubleshooting
+```mermaid
+flowchart TD
+    subgraph BTCTX["Bluetooth stack context"]
+        A2DP["A2DP data callback<br/><i>enqueue only, never block</i>"]
+        EVT["GAP / A2DP / AVRCP<br/>event callbacks"]
+    end
+    subgraph APPCTX["Application task"]
+        WORK["work dispatcher<br/><i>bt_core</i>"]
+    end
+    subgraph AUDCTX["Audio writer task"]
+        RB[("ring buffer")]
+        PROC["volume + biquad EQ"]
+        I2S["i2s_channel_write"]
+    end
 
-* Program upload failure
+    EVT --> WORK
+    WORK --> RB
+    A2DP --> RB
+    RB --> PROC --> I2S
 
-    * Hardware connection is not correct: run `idf.py -p PORT monitor`, and reboot your board to see if there are any output logs.
-    * The baud rate for downloading is too high: lower your baud rate in the `menuconfig` menu, and try again.
+    classDef ctx fill:none,stroke-dasharray:4 3
+    class BTCTX,APPCTX,AUDCTX ctx
+```
 
-## Technical support and feedback
+Everything expensive happens in the audio writer task. The A2DP data callback runs
+in Bluetooth stack context and does nothing but hand bytes to the ring buffer —
+doing DSP there starves the stack and causes dropouts.
 
-Please use the following feedback channels:
+## Hardware
 
-* For technical queries, go to the [esp32.com](https://esp32.com/) forum
-* For a feature request or bug report, create a [GitHub issue](https://github.com/espressif/esp-idf/issues)
+Planned wiring for the prototype. **Not yet verified against real hardware** — the
+DAC is not connected as of this writing.
 
-We will get back to you as soon as possible.
+| ESP32   | PCM5102A | Signal                |
+| ------- | -------- | --------------------- |
+| GPIO 26 | BCK      | Bit clock             |
+| GPIO 25 | LRCK     | Word select (L/R)     |
+| GPIO 22 | DIN      | Serial data           |
+| 3V3     | VIN      | Power                 |
+| GND     | GND      | Ground                |
+
+PCM5102A breakout jumpers:
+
+| Pin  | Tie to | Why                                              |
+| ---- | ------ | ------------------------------------------------ |
+| SCK  | GND    | Use the internal PLL; floating SCK gives silence  |
+| XSMT | 3V3    | Release soft-mute; low means muted                |
+| FMT  | GND    | I²S (Philips) frame format                        |
+| FLT  | GND    | Normal latency filter                             |
+| DEMP | GND    | De-emphasis off                                   |
+
+Pins are configurable — see `idf.py menuconfig` → *BlueAudio Puck*.
+
+## Building
+
+The project targets **ESP-IDF v5.5.4**.
+
+```powershell
+& 'C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1'
+idf.py set-target esp32
+idf.py build
+idf.py -p COM10 flash monitor
+```
+
+`sdkconfig` is generated and gitignored; `sdkconfig.defaults` is the source of truth.
+
+## Roadmap
+
+```mermaid
+flowchart LR
+    P0["Scaffold<br/>banner + CI"] --> P1["A2DP sink<br/>+ I²S out"]
+    P1 --> P2["AVRCP<br/>volume + transport"]
+    P2 --> P3["DSP<br/>volume + EQ"]
+    P3 --> P4["UI<br/>button + LED"]
+    P4 --> P5["Power<br/>sniff, DFS, sleep"]
+```
+
+## Prior art
+
+This firmware is written from scratch against the IDF v5.5 API, but the following
+projects informed its design and are worth reading:
+
+- [WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED](https://github.com/WillyBilly06/ESP32-A2DP-SINK-WITH-CODECS-UPDATED) — LDAC/aptX/AAC patched into the IDF stack
+- [YetAnotherElectronicsChannel/ESP32_4CH_DSP_BT_AMPLIFIER](https://github.com/YetAnotherElectronicsChannel/ESP32_4CH_DSP_BT_AMPLIFIER) — parametric EQ with a Wi-Fi config UI
+- [ESP32 as BT receiver with DSP capabilities](https://hackaday.io/project/166122-esp32-as-bt-receiver-with-dsp-capabilities) — biquads in the a2dp_sink render path
+- [gangg111/ESP32-Bluetooth-Audio-Receiver](https://github.com/gangg111/ESP32-Bluetooth-Audio-Receiver) — PCM5102A + OLED metadata display
+- [pschatzmann/ESP32-A2DP](https://github.com/pschatzmann/ESP32-A2DP) — the reference Arduino-side A2DP library
+
+## Licence
+
+MIT — see [LICENSE](LICENSE).
