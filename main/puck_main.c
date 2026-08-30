@@ -242,6 +242,7 @@ static void handle_a2dp_event(uint16_t event, void *param)
             memcpy(s_peer, a2d->conn_stat.remote_bda, sizeof(s_peer));
             s_peer_valid = true;
             puck_avrcp_set_audio_peer(a2d->conn_stat.remote_bda);
+            bt_core_link_monitor_start(a2d->conn_stat.remote_bda);
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
             puck_ui_set_state(PUCK_UI_CONNECTED);
             puck_power_set_activity(PUCK_POWER_LINKED);
@@ -250,6 +251,7 @@ static void handle_a2dp_event(uint16_t event, void *param)
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_stop());
             s_peer_valid = false;
             puck_avrcp_set_audio_peer(NULL);
+            bt_core_link_monitor_stop();
             /* Reachable to bonded sources, invisible to everyone else. */
             leave_pairing_mode();
             puck_ui_set_state(PUCK_UI_CONNECTED);
@@ -359,6 +361,11 @@ static void a2dp_data_cb(const uint8_t *data, uint32_t len)
 static void gap_event_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *param)
 {
     char bda[18];
+
+    /* The link monitor takes its own event and nothing else. */
+    if (bt_core_handle_gap_event(event, param)) {
+        return;
+    }
 
     switch (event) {
     case ESP_BT_GAP_AUTH_CMPL_EVT:

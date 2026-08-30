@@ -220,6 +220,39 @@ ceiling on refresh rate regardless of what the CPU could manage.
 Only the line that overflows scrolls, and it **pauses at both ends**. Text that
 slides continuously is materially harder to read than text that stops.
 
+## The signal meter measures something other than what it looks like
+
+Bluetooth Classic has no absolute RSSI in the way Wi-Fi or BLE do.
+`esp_bt_gap_read_rssi_delta()` returns a **delta from the Golden Receive Power
+Range** — the window the controller is actively working to keep the link
+inside. The header is explicit: *"The value zero indicates that the RSSI is
+inside the Golden Receive Power Range."*
+
+So zero means healthy, and a well-behaved link reports zero most of the time.
+The meter therefore sits full during normal use, and only falls as the link
+degrades. That is the correct behaviour, but it is the opposite of the
+intuition a phone's signal bars build — hence the note in the README and the
+Kconfig help, so nobody files it as a bug.
+
+The thresholds mapping delta to bars are judgement, not specification:
+
+| Delta | Bars |
+| --- | --- |
+| ≥ 0 | 4 |
+| −1 … −5 | 3 |
+| −6 … −15 | 2 |
+| −16 … −30 | 1 |
+| < −30 | 0 |
+
+Two smaller decisions:
+
+- **The meter is hidden when nothing is connected.** An empty meter reads as a
+  fault; absent is honest about there being nothing to measure.
+- **Empty bars still draw their baseline.** Without it, a genuinely weak signal
+  and a broken renderer look identical on a monochrome panel.
+- **A failed read invalidates the reading** rather than holding the last good
+  value. A stale four bars on a dying link is worse than no bars.
+
 ## Why the panel driver is hand-written
 
 Same reason the Bluetooth components are: this repository builds with nothing

@@ -296,6 +296,25 @@ void gfx_text_window(uint8_t *fb, int x, int y, int window_w, const char *s,
     (void)glyph_h;
 }
 
+void gfx_signal_bars(uint8_t *fb, int x, int y, uint8_t bars, bool known)
+{
+    /* Four bars, 2 px wide with a 1 px gap, ascending 2/4/6/8 px and sitting
+     * on a common baseline -- the shape everyone already reads as signal. */
+    for (int i = 0; i < 4; i++) {
+        const int bx = x + i * 3;
+        const int h = 2 + i * 2;
+        const int top = y + 8 - h;
+
+        if (known && i < bars) {
+            gfx_fill_rect(fb, bx, top, 2, h, true);
+        } else {
+            /* Draw the base of an empty bar. Without it a weak signal and a
+             * broken renderer look identical. */
+            gfx_hline(fb, bx, y + 7, 2, true);
+        }
+    }
+}
+
 void gfx_battery(uint8_t *fb, int x, int y, uint8_t percent)
 {
     /* 13x7 body with a 2x3 terminal on the right. */

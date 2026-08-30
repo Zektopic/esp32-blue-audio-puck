@@ -89,3 +89,15 @@ int gfx_text_width(const char *s, int scale);
 
 /** @brief Battery outline with a fill proportional to @p percent. */
 void gfx_battery(uint8_t *fb, int x, int y, uint8_t percent);
+
+/** Width in pixels of the signal meter, so callers can lay out around it. */
+#define SIGNAL_METER_WIDTH 11
+
+/**
+ * @brief Four ascending signal bars.
+ *
+ * @param bars   0..4 filled. Empty bars still show their base, so the meter
+ *               reads as "weak" rather than as a rendering fault.
+ * @param known  false draws all four bases with no fill: no reading yet.
+ */
+void gfx_signal_bars(uint8_t *fb, int x, int y, uint8_t bars, bool known);

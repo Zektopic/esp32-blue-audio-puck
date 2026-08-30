@@ -26,7 +26,7 @@ external DAC and headphone amplifier feeding a 3.5 mm jack.
 | **I²S output** | 16-bit PCM to an external DAC. APLL-clocked for accurate 44.1 kHz. |
 | **AVRCP, both roles** | Phone's volume slider works; track metadata comes back; buttons drive transport. |
 | **Parametric EQ** | Five biquad bands per channel, sample-rate aware, ~16% of one core when fully active. |
-| **OLED status screen** | 128x64 SSD1306 over I2C: track, artist, transport, volume, battery. |
+| **OLED status screen** | 128x64 SSD1306 over I2C: signal, track, artist, transport, volume, battery. |
 | **Battery gauge** | ADC on a divider, Li-po curve, low and critical warnings. |
 | **Physical UI** | One multi-function button, optional volume keys, optional PWM status LED. |
 | **Power policy** | Capped TX power, 80–160 MHz frequency scaling, deep sleep on idle. |
@@ -202,12 +202,24 @@ I (1373) puck: no bonded sources; discoverable as "BlueAudio Puck"
 | Splash | While the stack comes up |
 | `PAIRING` | Discoverable, waiting for a source |
 | `IDLE` | Connectable, nothing connected |
-| Now playing | Track and artist, transport state, volume bar, battery |
+| Now playing | Signal, track and artist, transport state, volume bar, battery |
+
+The top-left **signal meter** shows link quality while a source is connected.
+It is hidden when nothing is connected, because bars against no link would be
+meaningless. Note what Bluetooth Classic actually reports — see below.
 
 The track title scrolls when it is too long, pausing at each end — continuous
 sliding is much harder to read. Volume changes raise a brief toast over the
 bottom of the screen. Battery shows as a percentage and an icon, or `USB` when
 no sense divider is fitted.
+
+> [!NOTE]
+> **The signal meter will usually read full, and that is correct.** Bluetooth
+> Classic does not report absolute signal strength. It reports a delta from the
+> *Golden Receive Power Range* — the window the controller works to keep the
+> link inside — so **zero means healthy**, not "no signal". The value only goes
+> negative once the link is genuinely struggling. Read the bars as *fine /
+> getting worse / about to drop out*, not as dBm.
 
 At start-up the panel runs a **self test** — solid fill, checkerboard, then a
 border — before any text is drawn. None of it uses the font, which is the
@@ -241,6 +253,7 @@ All under `idf.py menuconfig` → **BlueAudio Puck**. Every GPIO accepts `-1` fo
 | `PUCK_DISPLAY_I2C_ADDRESS` | 0x3C | Some modules strap to 0x3D |
 | `PUCK_DISPLAY_CONTRAST` | 127 | |
 | `PUCK_DISPLAY_SELF_TEST` | on | ~1.4 s of boot time |
+| `PUCK_RSSI_POLL_SECONDS` | 3 | How often the signal meter updates |
 | `PUCK_BATTERY_ADC_GPIO` | -1 | ADC1 pins only (32–39) |
 | `PUCK_BATTERY_DIVIDER_RATIO_X100` | 200 | 2:1; must match your resistors |
 | `PUCK_LED_GPIO` | -1 | GPIO 2 is now I²S data |

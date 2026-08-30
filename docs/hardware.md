@@ -93,6 +93,9 @@ run at 400 kHz. A long or unreliable bus wants real resistors.
 A full frame is 1025 bytes; at 400 kHz that is about 21 ms, which is why the
 refresh task runs at a few hertz rather than at video rates.
 
+The screen needs no extra hardware for the signal meter — link quality comes
+from the Bluetooth controller, not from a sensor.
+
 ### Battery sensing
 
 Optional and unfitted by default. A divider from the cell to an ADC1 pin:
