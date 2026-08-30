@@ -22,6 +22,7 @@
 #include "esp_log.h"
 #include "esp_system.h"
 
+#include "audio_dsp.h"
 #include "audio_sink.h"
 #include "bt_core.h"
 #include "puck_avrcp.h"
@@ -121,6 +122,9 @@ static void handle_a2dp_event(uint16_t event, void *param)
         ESP_LOGI(TAG, "SBC configured: %" PRIu32 " Hz, %u ch, bitpool %u-%u",
                  rate, channels, mcc->cie.sbc_info.min_bitpool, mcc->cie.sbc_info.max_bitpool);
         ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_set_format(rate, channels));
+        /* Biquad coefficients are a function of frequency over sample rate, so
+         * a source that picks 48 kHz would otherwise shift the whole curve. */
+        ESP_ERROR_CHECK_WITHOUT_ABORT(audio_dsp_set_sample_rate(rate));
         break;
     }
 
@@ -239,6 +243,8 @@ void app_main(void)
     /* Audio output first: the I2S channel must exist before the first A2DP
      * packet can arrive. */
     ESP_ERROR_CHECK(audio_sink_init());
+    ESP_ERROR_CHECK(audio_dsp_init(44100));
+    audio_sink_set_processor(audio_dsp_process);
 
     ESP_ERROR_CHECK(bt_core_stack_init());
     ESP_ERROR_CHECK(bt_core_task_start());

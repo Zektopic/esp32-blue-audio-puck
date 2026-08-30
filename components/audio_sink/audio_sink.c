@@ -55,6 +55,7 @@ typedef struct {
     volatile bool           running;   /*!< I2S channel enabled */
     volatile ringbuf_mode_t mode;
     volatile int32_t        gain_q15;  /*!< playback gain, GAIN_UNITY == 0 dB */
+    audio_sink_process_cb_t processor; /*!< optional DSP hook, writer task only */
     uint32_t                sample_rate_hz;
     uint8_t                 channels;
     audio_sink_stats_t      stats;
@@ -126,6 +127,13 @@ static void writer_task(void *arg)
                 ESP_LOGD(TAG, "underrun, re-prefetching");
             }
             continue;
+        }
+
+        /* Processing order is EQ then volume: the equaliser works at full
+         * scale where it has the most headroom, and attenuation comes last. */
+        const audio_sink_process_cb_t processor = s_snk.processor;
+        if (processor != NULL) {
+            processor((int16_t *)data, chunk / sizeof(int16_t), s_snk.channels);
         }
 
         /* Read once: the AVRCP task can change this mid-block, and a torn
@@ -290,6 +298,11 @@ esp_err_t audio_sink_set_format(uint32_t sample_rate_hz, uint8_t channels)
         ESP_RETURN_ON_ERROR(audio_sink_start(), TAG, "restart after reconfigure failed");
     }
     return ESP_OK;
+}
+
+void audio_sink_set_processor(audio_sink_process_cb_t cb)
+{
+    s_snk.processor = cb;
 }
 
 void audio_sink_set_volume(uint8_t avrcp_volume)

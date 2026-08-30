@@ -1,0 +1,21 @@
+menu "BlueAudio Puck: equaliser"
+
+    config PUCK_EQ_BANDS
+        int "Number of parametric bands per channel"
+        default 5
+        range 1 10
+        help
+            Each band is one biquad section per channel. Bands sitting at 0 dB
+            are bypassed at runtime and cost nothing, so this sets the ceiling
+            rather than a fixed price. Five is the usual tone-control layout:
+            low shelf, three bells, high shelf.
+
+    config PUCK_EQ_ENABLED_AT_BOOT
+        bool "Enable the equaliser at start-up"
+        default n
+        help
+            Off by default so the puck starts out transparent. The bands begin
+            flat in any case, so turning this on changes nothing until a band
+            is given some gain.
+
+endmenu

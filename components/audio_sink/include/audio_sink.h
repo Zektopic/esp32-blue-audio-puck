@@ -59,6 +59,23 @@ esp_err_t audio_sink_stop(void);
 esp_err_t audio_sink_set_format(uint32_t sample_rate_hz, uint8_t channels);
 
 /**
+ * @brief In-place processing hook, run on the writer task before the gain.
+ *
+ * @param samples   Interleaved 16-bit PCM.
+ * @param count     Number of int16 samples, not frames.
+ * @param channels  1 or 2.
+ */
+typedef void (*audio_sink_process_cb_t)(int16_t *samples, size_t count, uint8_t channels);
+
+/**
+ * @brief Install a processing hook, or NULL to remove one.
+ *
+ * Keeps audio_sink independent of whatever does the processing: with no hook
+ * installed the writer path costs nothing extra.
+ */
+void audio_sink_set_processor(audio_sink_process_cb_t cb);
+
+/**
  * @brief Set playback gain from an AVRCP absolute volume value.
  *
  * The mapping is cubic rather than linear: volume sliders are perceptual, and
