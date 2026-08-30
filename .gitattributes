@@ -1,0 +1,9 @@
+# Normalise line endings. Several files were rewritten by Windows tooling that
+# defaults to CRLF, which turns a three-line change into a whole-file diff.
+* text=auto eol=lf
+
+# Binaries and images must never be touched.
+*.png binary
+*.jpg binary
+*.bin binary
+*.elf binary
