@@ -1,0 +1,43 @@
+menu "BlueAudio Puck: display"
+
+    config PUCK_I2C_SDA_GPIO
+        int "I2C SDA GPIO (-1 if no display fitted)"
+        default 21
+        range -1 39
+
+    config PUCK_I2C_SCL_GPIO
+        int "I2C SCL GPIO (-1 if no display fitted)"
+        default 22
+        range -1 39
+
+    config PUCK_DISPLAY_I2C_ADDRESS
+        hex "SSD1306 I2C address"
+        default 0x3C
+        range 0x08 0x77
+        help
+            0.96" SSD1306 modules ship strapped to either 0x3C or 0x3D
+            depending on a solder jumper. 0x3C is far more common and is what
+            the board this firmware was developed against answers on.
+
+            If the panel stays dark, check the boot log: the driver probes the
+            bus before configuring anything and says plainly when nothing
+            acknowledges.
+
+    config PUCK_DISPLAY_CONTRAST
+        int "Contrast (0-255)"
+        default 127
+        range 0 255
+        help
+            Lower is dimmer and draws slightly less current. OLED brightness is
+            not linear in this value.
+
+    config PUCK_DISPLAY_SELF_TEST
+        bool "Run the panel self test at start-up"
+        default y
+        help
+            Fills the screen, then a checkerboard, then a border, before any
+            text is drawn. None of it uses the font, which is the point: it
+            separates a bus or panel fault from a text rendering fault. Costs
+            about 1.4 seconds of boot time.
+
+endmenu

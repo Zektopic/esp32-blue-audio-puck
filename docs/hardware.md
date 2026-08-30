@@ -2,10 +2,11 @@
 
 Parts, wiring, power budget and the route from a breadboard to a puck.
 
-> [!WARNING]
-> **Nothing on this page has been verified against built hardware.** The
-> prototype is an ESP32 devkit with no DAC attached. Pin assignments are
-> proposals; power figures are datasheet-derived estimates, not measurements.
+> [!NOTE]
+> The pin map below is **as wired**. The I²C bus and OLED address are confirmed
+> by a scan on the real board. Everything about audio and power is still
+> unverified: no DAC has produced sound yet, no cell is fitted, and the power
+> figures are datasheet-derived estimates rather than measurements.
 
 ## Why the original ESP32
 
@@ -25,32 +26,87 @@ Use a **WROOM-32U with an external antenna** if you can. A puck lives in a
 pocket or bag with a body between it and the phone, and builders consistently
 report better range with an external antenna than with the PCB one.
 
-## Phase 0 — breadboard
+## The pin map, and why these pins
 
-What the current firmware targets.
+The layout lets a PCM5102A board sit **directly beneath** an ESP32 devkit,
+joined by short solder bridges, instead of using whichever pins are convenient
+on a breadboard. That is what makes it a puck rather than a project box.
 
-| ESP32 | PCM5102A | Signal |
+| ESP32 | Signal | Goes to |
 | --- | --- | --- |
-| GPIO 26 | BCK | Bit clock |
-| GPIO 25 | LRCK | Word select (L/R) |
-| GPIO 22 | DIN | Serial data |
-| 3V3 | VIN | Power |
-| GND | GND | Ground |
+| GPIO 4 | I²S BCK | PCM5102A `BCK` |
+| GPIO 15 | I²S LRCK | PCM5102A `LRCK` |
+| GPIO 2 | I²S DATA | PCM5102A `DIN` |
+| GPIO 21 | I²C SDA | SSD1306 `SDA` |
+| GPIO 22 | I²C SCL | SSD1306 `SCL` |
+| GPIO 33 | Button | to GND |
+| GPIO 35 | Battery sense | divider midpoint (optional) |
+| 3V3, GND | Power | both boards |
 
-Plus a button from GPIO 33 to ground, and a LED on GPIO 2 (already fitted on
-most devkits).
+Three things about these pins are worth knowing before you solder.
+
+**No MCLK wire.** Solder the `SCK` bridge on the front of the PCM5102A and it
+derives its own clock from BCK. The ESP32 pin that would otherwise carry MCLK
+is left unconnected — put tape over it so it cannot short to the DAC board
+sitting on top.
+
+**GPIO 2 is doing double duty.** It is the devkit's on-board LED pin, so that
+LED now flickers with audio data. Harmless, and the reason `PUCK_LED_GPIO`
+defaults to *not fitted*: an external status LED needs a free pin such as 27,
+and with the OLED fitted it is largely redundant anyway.
+
+**GPIO 2 and GPIO 15 are strapping pins.** Only during reset — driving them as
+outputs afterwards is fine, which is what makes this layout work at all. The
+practical consequence is that a DAC loading GPIO 2 can stop the board entering
+download mode, so hold **BOOT** while flashing if `idf.py flash` reports
+`Wrong boot mode detected (0x13)`.
 
 ### PCM5102A jumpers
 
-These cause most of the "no sound" reports on these breakouts.
+These cause most of the "no sound" reports on these boards.
 
-| Pin | Tie to | Why |
+| Pin | Set to | Why |
 | --- | --- | --- |
-| SCK | GND | Selects the internal PLL. Floating gives silence. |
+| SCK bridge | **soldered** | Runs the internal PLL, so no MCLK wire is needed |
 | XSMT | 3V3 | Releases soft-mute. Low means muted. |
 | FMT | GND | I²S (Philips) format — matches the firmware default |
 | FLT | GND | Normal latency filter |
 | DEMP | GND | De-emphasis off |
+
+### The OLED
+
+A 0.96" 128x64 SSD1306 on the I²C bus. Confirmed on this hardware:
+
+```
+I (606) i2cprobe:   ACK at 0x3c
+I (616) i2cprobe: scan done, 1 device(s)
+```
+
+Modules ship strapped to **0x3C or 0x3D** depending on a solder jumper, so the
+address is a Kconfig option. The driver probes before configuring anything and
+says plainly when nothing answers, rather than producing a cascade of timeouts.
+
+Most breakouts fit their own 4.7 kΩ pull-ups. The firmware also enables the
+ESP32's internal pull-ups, which are weak (~45 kΩ) but adequate for a short
+run at 400 kHz. A long or unreliable bus wants real resistors.
+
+A full frame is 1025 bytes; at 400 kHz that is about 21 ms, which is why the
+refresh task runs at a few hertz rather than at video rates.
+
+### Battery sensing
+
+Optional and unfitted by default. A divider from the cell to an ADC1 pin:
+
+- **Two 100 kΩ resistors** give 2:1 — a full 4.2 V cell reads 2.1 V at the pin,
+  comfortably inside the ADC's ~3.1 V full scale at 11 dB attenuation, and the
+  pair draws about 21 µA.
+- **GPIO 35** is a good input: input-only, so it cannot be driven by mistake,
+  and it is ADC1. ADC2 is shared with the Wi-Fi radio and is refused.
+- Set `PUCK_BATTERY_DIVIDER_RATIO_X100` to match the resistors you actually
+  fitted. A percentage from the wrong ratio is worse than no percentage.
+
+A voltage-derived percentage is an estimate, not a fuel gauge — see
+[design-notes.md](design-notes.md#battery-percentage-is-an-estimate).
 
 If your breakout ties `FMT` high instead, switch the firmware to left-justified
 under **BlueAudio Puck → audio output → I²S frame format**. A format mismatch

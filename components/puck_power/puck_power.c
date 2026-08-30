@@ -29,6 +29,9 @@
 
 #include "puck_power.h"
 
+/* Optional: a build with no display component still links. */
+extern void puck_display_off(void) __attribute__((weak));
+
 static const char *TAG = "puck_power";
 
 typedef struct {
@@ -160,6 +163,12 @@ void puck_power_kick(void)
 void puck_power_sleep_now(void)
 {
     ESP_LOGI(TAG, "entering deep sleep, press the button to wake");
+
+    /* An OLED left lit draws tens of milliamps and would undo the whole point
+     * of sleeping. Weakly linked so a build without a display still links. */
+    if (puck_display_off) {
+        puck_display_off();
+    }
 
     /* Bring the radio down cleanly. A controller left running holds power
      * domains up and would undo the point of the exercise. */

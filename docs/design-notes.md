@@ -204,6 +204,78 @@ claiming to control it.
 **Deep sleep buys nothing during playback.** It is the difference between flat
 by morning and fine next week.
 
+## The display runs at two rates
+
+Track text and battery are read at **2 Hz**; the marquee animates at **8 Hz**
+from that cached copy.
+
+The split exists because `puck_avrcp_get_track()` takes the AVRCP mutex. A
+display has no business taking that eight times a second, and the rest of this
+codebase is careful to keep locks out of frequently-run paths. Caching costs a
+struct copy and removes the question entirely.
+
+A full frame is 1025 bytes over I²C at 400 kHz — about 21 ms. That sets the
+ceiling on refresh rate regardless of what the CPU could manage.
+
+Only the line that overflows scrolls, and it **pauses at both ends**. Text that
+slides continuously is materially harder to read than text that stops.
+
+## Why the panel driver is hand-written
+
+Same reason the Bluetooth components are: this repository builds with nothing
+but ESP-IDF, on any machine, with no network access at build time. Pulling
+`espressif/esp_lcd_ssd1306` from the component registry would give a panel
+driver but no text rendering, so a font would still be needed — and the whole
+SSD1306 driver is about two hundred lines.
+
+Two details in it are easy to get wrong:
+
+- **The charge pump (`0x8D 0x14`) must be enabled.** Without it the panel is
+  powered and configured but stays dark, which reads exactly like a dead
+  display or a wiring fault.
+- **Horizontal addressing mode** makes the framebuffer stream out in a single
+  write, and it means one byte spans eight rows of one column — the same
+  orientation the 5x7 font uses, so a glyph column drops in with no bit
+  shuffling.
+
+## The font is the one thing a compiler cannot check
+
+`font5x7.c` is in its own file deliberately. A wrong glyph cannot be caught by
+the compiler, by CI, or by any test without eyes on the panel — so when one
+turns out to be wrong, the fix should be a one-line edit in a table rather than
+surgery inside driver logic.
+
+For the same reason the panel runs a **self test** before any text is drawn:
+solid fill, checkerboard, then a border. None of it touches the font. A blank
+screen after the self test passes means the rendering is wrong; a blank screen
+during it means the bus or the panel is. Those have completely different fixes,
+and without the self test the symptom is identical.
+
+Anything outside printable ASCII renders as `?` rather than indexing past the
+table — track metadata comes from a phone and is not to be trusted.
+
+## Battery percentage is an estimate
+
+Not a fuel gauge, and the code says so in as many words.
+
+- Li-po terminal voltage **sags under load**. At the ~150 mA this device draws
+  while streaming, the same cell reads materially lower than it does idle.
+- The curve between 3.7 V and 3.9 V is **nearly flat**, and that span is most
+  of the useful capacity.
+
+So the curve is an eleven-point table rather than a formula — the real
+discharge curve is flat in the middle and steep at both ends, and any linear
+fit spends most of its life wrong. Readings are oversampled 16x and
+exponentially smoothed, because otherwise the on-screen percentage flickers
+with playback load.
+
+ADC1 only. ADC2 is shared with the Wi-Fi radio and its readings become
+unavailable whenever Wi-Fi is active; pinning to ADC1 removes the trap before
+anyone adds the config portal that keeps getting discussed. And
+`adc_cali_create_scheme_line_fitting` is allowed to fail rather than being
+`ESP_ERROR_CHECK`ed — it needs eFuse calibration data that not every ESP32
+carries.
+
 ## Things that bit during development
 
 - **`esp_a2d_sink_disconnect(NULL)` panics.** It takes the address by value as
@@ -223,3 +295,9 @@ by morning and fine next week.
   exist yet.
 - **Python on Windows writes CRLF by default.** Editing sources with it turns
   three-line changes into whole-file diffs. `.gitattributes` now pins LF.
+- **Adding an I²C display collided with the audio path.** GPIO 22 was the I²S
+  data pin and is the conventional I²C clock. Worth checking a new peripheral
+  against every pin already claimed, not just the obvious one.
+- **Some devkits will not auto-reset into download mode**, and a DAC loading
+  GPIO 2 makes it worse. `Wrong boot mode detected (0x13)` means hold **BOOT**
+  while flashing; it is not a firmware fault.

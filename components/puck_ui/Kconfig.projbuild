@@ -24,12 +24,16 @@ menu "BlueAudio Puck: buttons and LED"
 
     config PUCK_LED_GPIO
         int "Status LED GPIO (-1 if not fitted)"
-        default 2
+        default -1
         range -1 33
         help
             Driven by LEDC PWM so the LED can breathe and dim rather than only
-            blink. GPIO 2 is the on-board LED of most ESP32 devkits. Must be an
-            output-capable pin: GPIO 34-39 are input only.
+            blink. Must be an output-capable pin: GPIO 34-39 are input only.
+
+            Defaults to "not fitted" because GPIO 2 -- the on-board LED on most
+            devkits -- now carries I2S data. An external LED on a free pin such
+            as 27 works; with the OLED fitted the LED is largely redundant
+            anyway, since the screen shows the same states in words.
 
     config PUCK_LED_ACTIVE_LOW
         bool "Status LED is active low"

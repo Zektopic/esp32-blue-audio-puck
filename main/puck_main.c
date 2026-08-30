@@ -29,6 +29,7 @@
 #include "bt_core.h"
 #include "puck_avrcp.h"
 #include "puck_battery.h"
+#include "puck_display.h"
 #include "puck_power.h"
 #include "puck_ui.h"
 
@@ -63,6 +64,7 @@ static bool          s_peer_valid;
 static void leave_pairing_mode(void)
 {
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+    puck_display_set_screen(PUCK_SCREEN_IDLE);
     ESP_LOGI(TAG, "no longer discoverable; bonded sources can still reconnect");
 }
 
@@ -93,6 +95,7 @@ static void enter_pairing_mode(void)
     }
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
     puck_ui_set_state(PUCK_UI_PAIRING);
+    puck_display_set_screen(PUCK_SCREEN_PAIRING);
 
     if (s_pairing_timer != NULL) {
         esp_timer_stop(s_pairing_timer);
@@ -143,11 +146,15 @@ static void on_gesture(puck_ui_gesture_t gesture)
         forget_and_repair();
         break;
     case PUCK_UI_VOLUME_UP:
-        puck_avrcp_adjust_volume(CONFIG_PUCK_VOLUME_STEP);
+    case PUCK_UI_VOLUME_DOWN: {
+        puck_avrcp_adjust_volume(gesture == PUCK_UI_VOLUME_UP ? CONFIG_PUCK_VOLUME_STEP
+                                                              : -CONFIG_PUCK_VOLUME_STEP);
+        char msg[22];
+        snprintf(msg, sizeof(msg), "Volume %u%%",
+                 (unsigned)puck_avrcp_get_volume() * 100u / PUCK_VOLUME_MAX);
+        puck_display_toast(msg, 1200);
         break;
-    case PUCK_UI_VOLUME_DOWN:
-        puck_avrcp_adjust_volume(-CONFIG_PUCK_VOLUME_STEP);
-        break;
+    }
     default:
         break;
     }
@@ -175,6 +182,7 @@ static void on_battery_state(const puck_battery_reading_t *reading)
 /* Runs on the application task, via AVRCP. */
 static void on_track_change(const puck_track_info_t *info)
 {
+    puck_display_set_screen(PUCK_SCREEN_NOW_PLAYING);
     ESP_LOGI(TAG, "now playing: %s -- %s (%s)",
              info->artist[0] ? info->artist : "?",
              info->title[0] ? info->title : "?",
@@ -237,6 +245,7 @@ static void handle_a2dp_event(uint16_t event, void *param)
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
             puck_ui_set_state(PUCK_UI_CONNECTED);
             puck_power_set_activity(PUCK_POWER_LINKED);
+            puck_display_set_screen(PUCK_SCREEN_NOW_PLAYING);
         } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_stop());
             s_peer_valid = false;
@@ -444,6 +453,9 @@ void app_main(void)
 
     ESP_ERROR_CHECK(puck_battery_init());
     puck_battery_set_cb(on_battery_state);
+
+    /* After AVRCP and the battery: the display reads from both. */
+    ESP_ERROR_CHECK(puck_display_init());
 
     ESP_ERROR_CHECK(puck_ui_init());
     puck_ui_set_gesture_cb(on_gesture);
