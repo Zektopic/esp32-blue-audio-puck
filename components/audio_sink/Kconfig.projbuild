@@ -1,0 +1,70 @@
+menu "BlueAudio Puck: audio output"
+
+    config PUCK_I2S_BCK_GPIO
+        int "I2S bit clock (BCK) GPIO"
+        default 26
+        range 0 39
+        help
+            Connects to BCK on the PCM5102A breakout.
+
+    config PUCK_I2S_LRCK_GPIO
+        int "I2S word select (LRCK) GPIO"
+        default 25
+        range 0 39
+        help
+            Connects to LRCK/LCK on the PCM5102A breakout.
+
+    config PUCK_I2S_DOUT_GPIO
+        int "I2S data out (DIN) GPIO"
+        default 22
+        range 0 39
+        help
+            Connects to DIN on the PCM5102A breakout.
+
+    choice PUCK_I2S_SLOT_FORMAT
+        prompt "I2S frame format"
+        default PUCK_I2S_FORMAT_PHILIPS
+        help
+            Must match the DAC's format pin. On a PCM5102A breakout, FMT tied to
+            GND selects I2S (Philips); FMT tied high selects left-justified.
+
+        config PUCK_I2S_FORMAT_PHILIPS
+            bool "I2S (Philips) -- PCM5102A with FMT low"
+        config PUCK_I2S_FORMAT_MSB
+            bool "Left-justified (MSB) -- PCM5102A with FMT high"
+    endchoice
+
+    config PUCK_I2S_USE_APLL
+        bool "Clock I2S from the audio PLL"
+        default y
+        help
+            The audio PLL hits 44.1 kHz far more precisely than the default PLL
+            divider does, which avoids slow sample slip on long tracks. It costs
+            a small amount of extra current, so turn it off if runtime matters
+            more than pitch accuracy.
+
+    config PUCK_AUDIO_RINGBUF_KB
+        int "Audio ring buffer size (kB)"
+        default 32
+        range 8 64
+        help
+            Larger buffers ride out Wi-Fi coexistence and radio retries at the
+            cost of internal RAM and added latency. 32 kB is roughly 185 ms of
+            stereo 16-bit 44.1 kHz audio.
+
+    config PUCK_AUDIO_PREFETCH_PERCENT
+        int "Prefetch level before playback starts (% of buffer)"
+        default 60
+        range 20 90
+        help
+            Playback waits until the buffer is this full, then runs until it is
+            empty. A higher value stutters less and adds latency.
+
+    config PUCK_AUDIO_WRITER_CORE
+        int "CPU core for the I2S writer task"
+        default 1
+        range 0 1
+        help
+            Keep this off core 0, which runs the Bluetooth controller and stack.
+
+endmenu
