@@ -18,4 +18,14 @@ menu "BlueAudio Puck: equaliser"
             flat in any case, so turning this on changes nothing until a band
             is given some gain.
 
+    config PUCK_EQ_BENCHMARK_AT_BOOT
+        bool "Time the filter cascade at start-up"
+        default n
+        help
+            Runs the equaliser over a synthetic block at boot and logs
+            microseconds per block and the share of one core it would take with
+            every band active. Costs a few milliseconds of boot time and a
+            little code, so it is off by default -- turn it on when changing
+            the band count, then turn it back off.
+
 endmenu

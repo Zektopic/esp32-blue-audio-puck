@@ -76,6 +76,21 @@ bool audio_dsp_is_enabled(void);
 void audio_dsp_reset(void);
 
 /**
+ * @brief Time the filter cascade over a synthetic block.
+ *
+ * Answers the only question that matters when adding bands: how much of a core
+ * does this actually cost. Runs with the equaliser forced on, so it measures
+ * the configured bands whether or not they are currently applied, and restores
+ * the previous state afterwards. Needs no audio source and no DAC.
+ *
+ * @param block_samples  int16 samples per block, not frames.
+ * @param iterations     Passes to average over.
+ *
+ * @return Microseconds per block, or 0 if it could not run.
+ */
+uint32_t audio_dsp_benchmark(size_t block_samples, unsigned iterations);
+
+/**
  * @brief Filter a block of interleaved 16-bit samples in place.
  *
  * Runs on the audio writer task. Safe to call with the equaliser disabled.

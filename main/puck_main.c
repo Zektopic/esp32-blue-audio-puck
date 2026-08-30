@@ -396,6 +396,10 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_sink_init());
     ESP_ERROR_CHECK(audio_dsp_init(44100));
     audio_sink_set_processor(audio_dsp_process);
+#if CONFIG_PUCK_EQ_BENCHMARK_AT_BOOT
+    /* 1440 bytes is the writer's chunk: 720 int16 samples, 360 stereo frames. */
+    audio_dsp_benchmark(720, 200);
+#endif
 
 
     ESP_ERROR_CHECK(bt_core_stack_init());
