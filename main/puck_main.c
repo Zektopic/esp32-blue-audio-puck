@@ -28,6 +28,7 @@
 #include "audio_sink.h"
 #include "bt_core.h"
 #include "puck_avrcp.h"
+#include "puck_battery.h"
 #include "puck_power.h"
 #include "puck_ui.h"
 
@@ -148,6 +149,25 @@ static void on_gesture(puck_ui_gesture_t gesture)
         puck_avrcp_adjust_volume(-CONFIG_PUCK_VOLUME_STEP);
         break;
     default:
+        break;
+    }
+}
+
+/* Runs on the battery sampling task, only when the state changes. */
+static void on_battery_state(const puck_battery_reading_t *reading)
+{
+    switch (reading->state) {
+    case PUCK_BATTERY_CRITICAL:
+        ESP_LOGW(TAG, "battery critical: %u%% (%u mV)", reading->percent, reading->millivolts);
+        /* Deliberately no automatic shutdown. Cutting the audio out from under
+         * someone mid-track is worse than running the cell a little lower, and
+         * the protection circuit is the real backstop. */
+        break;
+    case PUCK_BATTERY_LOW:
+        ESP_LOGW(TAG, "battery low: %u%% (%u mV)", reading->percent, reading->millivolts);
+        break;
+    default:
+        ESP_LOGI(TAG, "battery %u%% (%u mV)", reading->percent, reading->millivolts);
         break;
     }
 }
@@ -421,6 +441,9 @@ void app_main(void)
         .dispatch_method = ESP_TIMER_TASK,
     };
     ESP_ERROR_CHECK(esp_timer_create(&pairing_args, &s_pairing_timer));
+
+    ESP_ERROR_CHECK(puck_battery_init());
+    puck_battery_set_cb(on_battery_state);
 
     ESP_ERROR_CHECK(puck_ui_init());
     puck_ui_set_gesture_cb(on_gesture);
