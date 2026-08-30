@@ -22,6 +22,7 @@
 #include "driver/i2s_std.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "audio_sink.h"
 
@@ -58,6 +59,7 @@ typedef struct {
     audio_sink_process_cb_t processor; /*!< optional DSP hook, writer task only */
     uint32_t                sample_rate_hz;
     uint8_t                 channels;
+    int64_t                 last_drop_log_us;
     audio_sink_stats_t      stats;
 } audio_sink_t;
 
@@ -350,7 +352,16 @@ size_t audio_sink_write(const uint8_t *data, size_t size)
     if (xRingbufferSend(s_snk.ringbuf, data, size, 0) != pdTRUE) {
         s_snk.mode = RB_DROPPING;
         s_snk.stats.dropped++;
-        ESP_LOGW(TAG, "ring buffer full, shedding audio");
+        /* Throttled: this runs in Bluetooth stack context, the log is a
+         * blocking UART write, and a source pushing faster than realtime makes
+         * the buffer oscillate around the drop threshold several times a
+         * second. The counter carries the real signal. */
+        const int64_t now = esp_timer_get_time();
+        if (now - s_snk.last_drop_log_us > 5000000) {
+            s_snk.last_drop_log_us = now;
+            ESP_LOGW(TAG, "ring buffer full, shedding audio (%" PRIu32 " dropped so far)",
+                     s_snk.stats.dropped);
+        }
         return 0;
     }
     s_snk.stats.packets++;

@@ -28,6 +28,7 @@ static const char *TAG = "puck_ui";
 #define POLL_INTERVAL_MS     20    /* while a button is down or a gesture is open */
 #define DEBOUNCE_MS          30
 #define LONG_PRESS_MS        1500
+#define VERY_LONG_PRESS_MS   5000
 #define MULTI_CLICK_GAP_MS   350   /* window to wait for another click */
 #define VOLUME_REPEAT_MS     220   /* auto-repeat while a volume button is held */
 
@@ -51,6 +52,7 @@ typedef struct {
     int64_t  last_release_us;
     uint8_t  click_count;
     bool     long_fired;      /*!< long press already reported for this hold */
+    bool     very_long_fired; /*!< very long press already reported for this hold */
 
     /* LED animation phase, advanced once per poll tick */
     uint16_t led_phase;
@@ -177,17 +179,24 @@ static bool service_main_button(int64_t now_us)
         s_ui.down = true;
         s_ui.down_at_us = now_us;
         s_ui.long_fired = false;
+        s_ui.very_long_fired = false;
         return true;
     }
 
     if (pressed && s_ui.down) {
-        if (!s_ui.long_fired && (now_us - s_ui.down_at_us) >= LONG_PRESS_MS * 1000) {
+        const int64_t held_us = now_us - s_ui.down_at_us;
+
+        if (!s_ui.long_fired && held_us >= LONG_PRESS_MS * 1000) {
             /* Fire on reaching the threshold, not on release: the user gets
                feedback while still holding, which is what makes it feel like a
                long press rather than a slow click. */
             s_ui.long_fired = true;
             s_ui.click_count = 0;
             emit(PUCK_UI_PRESS_LONG);
+        }
+        if (!s_ui.very_long_fired && held_us >= VERY_LONG_PRESS_MS * 1000) {
+            s_ui.very_long_fired = true;
+            emit(PUCK_UI_PRESS_VERY_LONG);
         }
         return true;
     }

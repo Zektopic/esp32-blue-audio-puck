@@ -29,6 +29,7 @@ typedef enum {
     PUCK_UI_PRESS_DOUBLE,
     PUCK_UI_PRESS_TRIPLE,
     PUCK_UI_PRESS_LONG,     /*!< held past the long-press threshold */
+    PUCK_UI_PRESS_VERY_LONG,/*!< held much longer: destructive actions */
     PUCK_UI_VOLUME_UP,      /*!< optional volume button, repeats while held */
     PUCK_UI_VOLUME_DOWN,
 } puck_ui_gesture_t;

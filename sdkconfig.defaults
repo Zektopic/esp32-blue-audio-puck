@@ -38,3 +38,9 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_160=y
 CONFIG_BTDM_CTRL_MODEM_SLEEP=y
 CONFIG_BTDM_CTRL_MODEM_SLEEP_MODE_ORIG=y
 CONFIG_BTDM_CTRL_LPCLK_SEL_MAIN_XTAL=y
+
+# --- Pairing ----------------------------------------------------------------
+# Secure Simple Pairing has no Kconfig symbol in ESP-IDF v5.5.4 -- the
+# `CONFIG_EXAMPLE_SSP_ENABLED` seen in the IDF examples is example-local, not a
+# stack option. SSP is selected at runtime through
+# `esp_bluedroid_config_t.ssp_en`, which bt_core sets explicitly.

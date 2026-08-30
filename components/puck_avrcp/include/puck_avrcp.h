@@ -55,6 +55,15 @@ void puck_avrcp_set_volume(uint8_t volume);
 void puck_avrcp_adjust_volume(int16_t delta);
 
 /**
+ * @brief Record which device holds the audio stream, or NULL to clear it.
+ *
+ * Absolute volume commands carry no address of their own, so this is what
+ * lets the puck refuse volume changes from a device that bonded once and is
+ * not the one currently playing.
+ */
+void puck_avrcp_set_audio_peer(const uint8_t *bda);
+
+/**
  * @brief Send a transport key to the source, e.g. ESP_AVRC_PT_CMD_PLAY.
  *
  * Sends press and release, which is what sources expect; a press alone is

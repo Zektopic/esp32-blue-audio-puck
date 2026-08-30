@@ -31,6 +31,9 @@ static const char *TAG = "avrcp";
 /* Metadata we ask the source for on every track change. */
 #define METADATA_ATTRS (ESP_AVRC_MD_ATTR_TITLE | ESP_AVRC_MD_ATTR_ARTIST | ESP_AVRC_MD_ATTR_ALBUM)
 
+/* Longest metadata string kept, matching the fields in puck_track_info_t. */
+#define METADATA_MAX_BYTES 63
+
 enum {
     WORK_CT_EVT = 0,
     WORK_TG_EVT,
@@ -38,6 +41,10 @@ enum {
 
 typedef struct {
     uint8_t                    volume;        /*!< 0..PUCK_VOLUME_MAX */
+    esp_bd_addr_t              tg_peer;       /*!< who holds the AVRCP target link */
+    esp_bd_addr_t              audio_peer;    /*!< who holds the A2DP stream */
+    bool                       tg_peer_valid;
+    bool                       audio_peer_valid;
     bool                       volume_notify; /*!< source is waiting on a volume change response */
     bool                       connected;
     bool                       playing;
@@ -50,13 +57,46 @@ typedef struct {
 
 static puck_avrcp_t s_rc;
 
-/* AVRCP transaction labels are 4 bits and must differ between outstanding
- * commands; a rolling counter is enough for the handful we ever have in
- * flight. Only ever called from the application task. */
+/*
+ * AVRCP transaction labels are 4 bits and must differ between outstanding
+ * commands.
+ *
+ * The increment is atomic because this is not single-threaded: event handlers
+ * call it on the application task, while puck_avrcp_send_key() is a public
+ * entry point the UI task calls directly. A torn read-modify-write hands two
+ * outstanding commands the same label, which sources answer wrongly or ignore.
+ */
 static uint8_t next_tl(void)
 {
-    s_rc.tl = (s_rc.tl + 1) & 0x0f;
-    return s_rc.tl;
+    return (uint8_t)(__atomic_add_fetch(&s_rc.tl, 1, __ATOMIC_RELAXED) & 0x0f);
+}
+
+/*
+ * Print a stored metadata field with anything non-printable removed.
+ *
+ * These bytes are chosen by the remote device. Echoing them raw lets a source
+ * inject ANSI escapes into the console of whoever is debugging the puck, and
+ * spam long lines to bury everything else in the log.
+ */
+static void log_sanitised(const char *what, uint8_t attr_id)
+{
+    const char *src = NULL;
+
+    switch (attr_id) {
+    case ESP_AVRC_MD_ATTR_TITLE:  src = s_rc.track.title;  break;
+    case ESP_AVRC_MD_ATTR_ARTIST: src = s_rc.track.artist; break;
+    case ESP_AVRC_MD_ATTR_ALBUM:  src = s_rc.track.album;  break;
+    default: return;
+    }
+
+    char safe[METADATA_MAX_BYTES + 1];
+    size_t i = 0;
+    for (; src[i] != '\0' && i < sizeof(safe) - 1; i++) {
+        const unsigned char c = (unsigned char)src[i];
+        safe[i] = (c >= 0x20 && c < 0x7f) ? (char)c : '.';
+    }
+    safe[i] = '\0';
+    ESP_LOGI(TAG, "%s 0x%x: %s", what, attr_id, safe);
 }
 
 static bool peer_supports(esp_avrc_rn_event_ids_t event)
@@ -147,12 +187,9 @@ static void handle_ct_event(uint16_t event, void *param)
     case ESP_AVRC_CT_METADATA_RSP_EVT:
         if (rc->meta_rsp.attr_text != NULL) {
             store_metadata(rc->meta_rsp.attr_id, rc->meta_rsp.attr_text, rc->meta_rsp.attr_length);
-            ESP_LOGI(TAG, "metadata 0x%x: %.*s", rc->meta_rsp.attr_id,
-                     (int)rc->meta_rsp.attr_length, (const char *)rc->meta_rsp.attr_text);
-            /* copy_metadata() allocated this; bt_core only frees the message. */
-            free(rc->meta_rsp.attr_text);
-            rc->meta_rsp.attr_text = NULL;
+            log_sanitised("metadata", rc->meta_rsp.attr_id);
         }
+        /* free_metadata() releases attr_text once this returns. */
         if (rc->meta_rsp.attr_id == ESP_AVRC_MD_ATTR_ALBUM && s_rc.track_cb) {
             /* Album is the last attribute of the batch, so the set is complete. */
             s_rc.track_cb(&s_rc.track);
@@ -197,12 +234,24 @@ static void handle_tg_event(uint16_t event, void *param)
 
     switch (event) {
     case ESP_AVRC_TG_CONNECTION_STATE_EVT:
-        if (!rc->conn_stat.connected) {
+        if (rc->conn_stat.connected) {
+            memcpy(s_rc.tg_peer, rc->conn_stat.remote_bda, sizeof(s_rc.tg_peer));
+            s_rc.tg_peer_valid = true;
+        } else {
             s_rc.volume_notify = false;
+            s_rc.tg_peer_valid = false;
         }
         break;
 
     case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT: {
+        /* Only the device actually streaming gets to move the volume. The
+         * command itself carries no address, so the target link's peer is
+         * compared against the A2DP peer recorded on connection. */
+        if (s_rc.audio_peer_valid && s_rc.tg_peer_valid &&
+            memcmp(s_rc.audio_peer, s_rc.tg_peer, sizeof(s_rc.audio_peer)) != 0) {
+            ESP_LOGW(TAG, "ignoring volume command from a device that is not the source");
+            break;
+        }
         const uint8_t volume = rc->set_abs_vol.volume & PUCK_VOLUME_MAX;
         xSemaphoreTake(s_rc.lock, portMAX_DELAY);
         s_rc.volume = volume;
@@ -250,13 +299,35 @@ static void copy_metadata(void *dst, void *src, int len)
         return;
     }
 
-    uint8_t *text = malloc(s->meta_rsp.attr_length);
+    /* Clamp to what store_metadata() can keep. The length is chosen by the
+     * remote device, and copying all of it would let a source dictate the size
+     * of a heap allocation on a device with ~100 kB of free heap. */
+    const uint16_t wanted = s->meta_rsp.attr_length;
+    const uint16_t kept = (wanted > METADATA_MAX_BYTES) ? METADATA_MAX_BYTES : wanted;
+
+    uint8_t *text = malloc(kept);
     if (text == NULL) {
         d->meta_rsp.attr_length = 0;
         return;
     }
-    memcpy(text, s->meta_rsp.attr_text, s->meta_rsp.attr_length);
+    memcpy(text, s->meta_rsp.attr_text, kept);
     d->meta_rsp.attr_text = text;
+    d->meta_rsp.attr_length = kept;
+}
+
+/*
+ * Release what copy_metadata() allocated.
+ *
+ * bt_core runs this on every disposal path, including the ones that never
+ * reach a handler -- a full work queue, or shutdown. Freeing only in the
+ * handler leaked on exactly the paths a flood of metadata responses drives.
+ */
+static void free_metadata(void *param)
+{
+    esp_avrc_ct_cb_param_t *p = (esp_avrc_ct_cb_param_t *)param;
+
+    free(p->meta_rsp.attr_text);
+    p->meta_rsp.attr_text = NULL;
 }
 
 /* Bluedroid context. */
@@ -264,14 +335,19 @@ static void ct_cb(esp_avrc_ct_cb_event_t event, esp_avrc_ct_cb_param_t *param)
 {
     switch (event) {
     case ESP_AVRC_CT_METADATA_RSP_EVT:
-        bt_core_dispatch(handle_ct_event, event, param, sizeof(*param), copy_metadata);
+        if (!bt_core_dispatch(handle_ct_event, event, param, sizeof(*param),
+                              copy_metadata, free_metadata)) {
+            /* Dropped. Metadata is cosmetic, so losing one is survivable --
+             * the next track change requests the whole set again. */
+            ESP_LOGD(TAG, "metadata event dropped");
+        }
         break;
     case ESP_AVRC_CT_CONNECTION_STATE_EVT:
     case ESP_AVRC_CT_PASSTHROUGH_RSP_EVT:
     case ESP_AVRC_CT_CHANGE_NOTIFY_EVT:
     case ESP_AVRC_CT_REMOTE_FEATURES_EVT:
     case ESP_AVRC_CT_GET_RN_CAPABILITIES_RSP_EVT:
-        bt_core_dispatch(handle_ct_event, event, param, sizeof(*param), NULL);
+        bt_core_dispatch(handle_ct_event, event, param, sizeof(*param), NULL, NULL);
         break;
     default:
         break;
@@ -287,7 +363,7 @@ static void tg_cb(esp_avrc_tg_cb_event_t event, esp_avrc_tg_cb_param_t *param)
     case ESP_AVRC_TG_PASSTHROUGH_CMD_EVT:
     case ESP_AVRC_TG_SET_ABSOLUTE_VOLUME_CMD_EVT:
     case ESP_AVRC_TG_REGISTER_NOTIFICATION_EVT:
-        bt_core_dispatch(handle_tg_event, event, param, sizeof(*param), NULL);
+        bt_core_dispatch(handle_tg_event, event, param, sizeof(*param), NULL, NULL);
         break;
     default:
         break;
@@ -328,13 +404,25 @@ uint8_t puck_avrcp_get_volume(void)
 
 void puck_avrcp_set_volume(uint8_t volume)
 {
+    if (s_rc.lock == NULL) {
+        ESP_LOGW(TAG, "volume change before AVRCP is up, ignored");
+        return;
+    }
     if (volume > PUCK_VOLUME_MAX) {
         volume = PUCK_VOLUME_MAX;
     }
 
+    /* Test-and-clear the notification flag inside the lock along with the
+     * volume. Outside it, a concurrent REGISTER_NOTIFICATION could see the flag
+     * set twice and answer one outstanding request twice, or lose it entirely
+     * and leave the phone's slider stuck. */
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);
     const bool changed = (s_rc.volume != volume);
     s_rc.volume = volume;
+    const bool answer_now = changed && s_rc.volume_notify;
+    if (answer_now) {
+        s_rc.volume_notify = false;
+    }
     xSemaphoreGive(s_rc.lock);
 
     if (!changed) {
@@ -343,13 +431,21 @@ void puck_avrcp_set_volume(uint8_t volume)
     audio_sink_set_volume(volume);
     ESP_LOGI(TAG, "volume set locally to %u%%", (unsigned)volume * 100 / PUCK_VOLUME_MAX);
 
-    /* Answer the source's outstanding notification request so its slider
-     * follows the buttons. The request is consumed by answering it. */
-    if (s_rc.volume_notify) {
+    /* Sent outside the lock: it calls into Bluedroid, which may block. */
+    if (answer_now) {
         esp_avrc_rn_param_t rn = { .volume = volume };
         esp_avrc_tg_send_rn_rsp(ESP_AVRC_RN_VOLUME_CHANGE, ESP_AVRC_RN_RSP_CHANGED, &rn);
-        s_rc.volume_notify = false;
     }
+}
+
+void puck_avrcp_set_audio_peer(const uint8_t *bda)
+{
+    if (bda == NULL) {
+        s_rc.audio_peer_valid = false;
+        return;
+    }
+    memcpy(s_rc.audio_peer, bda, sizeof(s_rc.audio_peer));
+    s_rc.audio_peer_valid = true;
 }
 
 void puck_avrcp_adjust_volume(int16_t delta)
@@ -384,7 +480,7 @@ void puck_avrcp_set_track_cb(puck_avrcp_track_cb_t cb)
 
 void puck_avrcp_get_track(puck_track_info_t *out)
 {
-    if (out == NULL) {
+    if (out == NULL || s_rc.lock == NULL) {
         return;
     }
     xSemaphoreTake(s_rc.lock, portMAX_DELAY);

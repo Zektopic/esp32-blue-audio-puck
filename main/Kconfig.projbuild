@@ -6,4 +6,14 @@ menu "BlueAudio Puck: identity"
         help
             Shown in the phone or computer pairing list.
 
+    config PUCK_PAIRING_WINDOW_SECONDS
+        int "How long the puck stays discoverable after a long press"
+        default 120
+        range 30 600
+        help
+            Outside this window the puck is connectable but not discoverable,
+            so devices it already knows can return while strangers cannot pair.
+            A puck with no bonded sources stays discoverable from boot, because
+            otherwise it could never be paired at all.
+
 endmenu

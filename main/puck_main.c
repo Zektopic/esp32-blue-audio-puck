@@ -22,6 +22,7 @@
 #include "esp_gap_bt_api.h"
 #include "esp_log.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 #include "audio_dsp.h"
 #include "audio_sink.h"
@@ -41,8 +42,38 @@ enum {
 static const char *const s_conn_state[] = {"disconnected", "connecting", "connected", "disconnecting"};
 static const char *const s_audio_state[] = {"suspended", "started"};
 
-/*
- * Re-open the puck to new sources.
+static esp_timer_handle_t s_pairing_timer;
+
+/* The source currently linked, so pairing mode knows whether there is
+ * anything to disconnect. */
+static esp_bd_addr_t s_peer;
+static bool          s_peer_valid;
+
+/**
+ * @brief Stop advertising, but stay reachable to devices already bonded.
+ *
+ * This is the resting state. A puck that is permanently discoverable can be
+ * bonded by anyone in range, at any moment, with no user action and no
+ * indication -- and Just Works pairing, the only kind hardware without a
+ * display can honestly offer, hands that stranger an encrypted but
+ * unauthenticated link. Limiting *when* pairing is possible is the part that
+ * is actually within our control.
+ */
+static void leave_pairing_mode(void)
+{
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+    ESP_LOGI(TAG, "no longer discoverable; bonded sources can still reconnect");
+}
+
+static void pairing_window_expired(void *arg)
+{
+    (void)arg;
+    leave_pairing_mode();
+    puck_ui_set_state(PUCK_UI_CONNECTED);
+}
+
+/**
+ * @brief Open a bounded window in which new sources may pair.
  *
  * Dropping the current link first is deliberate: a source that is already
  * connected will usually reconnect instantly, which would leave the user
@@ -50,10 +81,38 @@ static const char *const s_audio_state[] = {"suspended", "started"};
  */
 static void enter_pairing_mode(void)
 {
-    ESP_LOGI(TAG, "entering pairing mode");
-    esp_a2d_sink_disconnect(NULL);
+    ESP_LOGI(TAG, "discoverable for %d seconds", CONFIG_PUCK_PAIRING_WINDOW_SECONDS);
+
+    /* Only if something is actually linked. esp_a2d_sink_disconnect() takes an
+     * address by value as an array parameter, so a NULL argument is read
+     * straight through and panics -- which is what a boot into pairing mode
+     * with nothing connected used to do. */
+    if (s_peer_valid) {
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_a2d_sink_disconnect(s_peer));
+    }
     esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
     puck_ui_set_state(PUCK_UI_PAIRING);
+
+    if (s_pairing_timer != NULL) {
+        esp_timer_stop(s_pairing_timer);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(esp_timer_start_once(
+            s_pairing_timer, (uint64_t)CONFIG_PUCK_PAIRING_WINDOW_SECONDS * 1000000ULL));
+    }
+}
+
+/**
+ * @brief Forget every bonded source, then open a fresh pairing window.
+ *
+ * The only bond management a device with one button and one LED can offer.
+ * Without it there is no way to revoke a source that should no longer have
+ * access, including one that bonded during an unattended pairing window.
+ */
+static void forget_and_repair(void)
+{
+    ESP_LOGW(TAG, "forgetting all bonded sources");
+    ESP_ERROR_CHECK_WITHOUT_ABORT(bt_core_forget_bonds());
+    puck_avrcp_set_audio_peer(NULL);
+    enter_pairing_mode();
 }
 
 /* Runs on the UI task. */
@@ -78,6 +137,9 @@ static void on_gesture(puck_ui_gesture_t gesture)
         break;
     case PUCK_UI_PRESS_LONG:
         enter_pairing_mode();
+        break;
+    case PUCK_UI_PRESS_VERY_LONG:
+        forget_and_repair();
         break;
     case PUCK_UI_VOLUME_UP:
         puck_avrcp_adjust_volume(CONFIG_PUCK_VOLUME_STEP);
@@ -143,16 +205,25 @@ static void handle_a2dp_event(uint16_t event, void *param)
                  bt_core_bda_str(a2d->conn_stat.remote_bda, bda, sizeof(bda)));
 
         if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
-            /* Stop advertising while occupied: a second source cannot be
-             * served anyway, and staying discoverable wastes radio time. */
-            esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+            /* Close any open pairing window: a second source cannot be served
+             * anyway, and staying discoverable wastes radio time. */
+            if (s_pairing_timer != NULL) {
+                esp_timer_stop(s_pairing_timer);
+            }
+            leave_pairing_mode();
+            memcpy(s_peer, a2d->conn_stat.remote_bda, sizeof(s_peer));
+            s_peer_valid = true;
+            puck_avrcp_set_audio_peer(a2d->conn_stat.remote_bda);
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_start());
             puck_ui_set_state(PUCK_UI_CONNECTED);
             puck_power_set_activity(PUCK_POWER_LINKED);
         } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
             ESP_ERROR_CHECK_WITHOUT_ABORT(audio_sink_stop());
-            esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
-            puck_ui_set_state(PUCK_UI_PAIRING);
+            s_peer_valid = false;
+            puck_avrcp_set_audio_peer(NULL);
+            /* Reachable to bonded sources, invisible to everyone else. */
+            leave_pairing_mode();
+            puck_ui_set_state(PUCK_UI_CONNECTED);
             puck_power_set_activity(PUCK_POWER_IDLE);
         }
         break;
@@ -203,9 +274,6 @@ static void handle_stack_up(uint16_t event, void *param)
 
     ESP_ERROR_CHECK(esp_bt_gap_set_device_name(CONFIG_PUCK_BT_DEVICE_NAME));
 
-    /* AVRCP before A2DP: Bluedroid warns "A2DP Enable without AVRC" and skips
-     * part of its SDP record if the remote control profiles are not up yet. */
-    ESP_ERROR_CHECK(puck_avrcp_init());
     ESP_ERROR_CHECK(esp_a2d_sink_init());
 
     /* Announce ourselves as headphones so phones show the right icon and pick
@@ -217,9 +285,19 @@ static void handle_stack_up(uint16_t event, void *param)
                        },
                        ESP_BT_SET_COD_ALL);
 
-    ESP_ERROR_CHECK(esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE));
-    puck_ui_set_state(PUCK_UI_PAIRING);
-    ESP_LOGI(TAG, "discoverable as \"%s\"", CONFIG_PUCK_BT_DEVICE_NAME);
+    /* A puck that has never been paired must advertise or it is useless. One
+     * that already remembers a source need not: it stays connectable so that
+     * source can return, and becomes discoverable again only when the user
+     * asks for it with a long press. */
+    const int bonds = bt_core_bond_count();
+    if (bonds > 0) {
+        ESP_LOGI(TAG, "%d bonded source(s); hold the button to pair another", bonds);
+        leave_pairing_mode();
+        puck_ui_set_state(PUCK_UI_CONNECTED);
+    } else {
+        ESP_LOGI(TAG, "no bonded sources; discoverable as \"%s\"", CONFIG_PUCK_BT_DEVICE_NAME);
+        enter_pairing_mode();
+    }
 }
 
 /* Bluedroid context -- keep short. */
@@ -229,7 +307,12 @@ static void a2dp_event_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
     case ESP_A2D_CONNECTION_STATE_EVT:
     case ESP_A2D_AUDIO_STATE_EVT:
     case ESP_A2D_AUDIO_CFG_EVT:
-        bt_core_dispatch(handle_a2dp_event, event, param, sizeof(*param), NULL);
+        if (!bt_core_dispatch(handle_a2dp_event, event, param, sizeof(*param), NULL, NULL)) {
+            /* These events carry durable state: discoverability, and whether
+             * the sink is running. Losing one leaves the puck in a state
+             * nothing else corrects, so it is an error, not a debug line. */
+            ESP_LOGE(TAG, "A2DP event %d dropped; link state may be stale", event);
+        }
         break;
     default:
         ESP_LOGD(TAG, "A2DP event %d ignored", event);
@@ -308,8 +391,6 @@ void app_main(void)
     ESP_ERROR_CHECK(audio_dsp_init(44100));
     audio_sink_set_processor(audio_dsp_process);
 
-    ESP_ERROR_CHECK(puck_ui_init());
-    puck_ui_set_gesture_cb(on_gesture);
 
     ESP_ERROR_CHECK(bt_core_stack_init());
     ESP_ERROR_CHECK(bt_core_task_start());
@@ -318,11 +399,30 @@ void app_main(void)
      * only be set on a running controller. */
     ESP_ERROR_CHECK(puck_power_init());
 
+    /* AVRCP before both the A2DP sink and the UI task. Before the sink because
+     * Bluedroid builds its SDP record at esp_a2d_sink_init() and otherwise
+     * warns "A2DP Enable without AVRC"; before the UI because a button press
+     * calls straight into puck_avrcp, whose mutex must already exist. */
+    ESP_ERROR_CHECK(puck_avrcp_init());
+
+    const esp_timer_create_args_t pairing_args = {
+        .callback        = pairing_window_expired,
+        .name            = "pairing",
+        .dispatch_method = ESP_TIMER_TASK,
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&pairing_args, &s_pairing_timer));
+
+    ESP_ERROR_CHECK(puck_ui_init());
+    puck_ui_set_gesture_cb(on_gesture);
+
     puck_avrcp_set_track_cb(on_track_change);
 
     ESP_ERROR_CHECK(esp_bt_gap_register_callback(gap_event_cb));
     ESP_ERROR_CHECK(esp_a2d_register_callback(a2dp_event_cb));
     ESP_ERROR_CHECK(esp_a2d_sink_register_data_callback(a2dp_data_cb));
 
-    bt_core_dispatch(handle_stack_up, PUCK_WORK_STACK_UP, NULL, 0, NULL);
+    if (!bt_core_dispatch(handle_stack_up, PUCK_WORK_STACK_UP, NULL, 0, NULL, NULL)) {
+        ESP_LOGE(TAG, "could not queue stack bring-up");
+        puck_ui_set_state(PUCK_UI_FAULT);
+    }
 }

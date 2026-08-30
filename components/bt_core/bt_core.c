@@ -14,6 +14,8 @@
 #include "freertos/queue.h"
 #include "freertos/task.h"
 
+#include "esp_timer.h"
+
 #include "esp_bt.h"
 #include "esp_check.h"
 #include "esp_bt_device.h"
@@ -32,12 +34,31 @@ static const char *TAG = "bt_core";
 
 typedef struct {
     bt_core_work_t work;
+    bt_core_free_t dtor;    /*!< frees nested allocations, on every path */
     uint16_t       event;
     void          *param;
 } bt_core_msg_t;
 
-static QueueHandle_t s_queue;
-static TaskHandle_t  s_task;
+static QueueHandle_t   s_queue;
+static TaskHandle_t    s_task;
+static volatile bool   s_task_should_exit;
+static int64_t         s_last_drop_log_us;
+
+/*
+ * Release a message on any disposal path.
+ *
+ * The destructor has to run here rather than at the end of the handler: the
+ * queue-full and shutdown paths never reach a handler, and those are exactly
+ * the paths a hostile source can drive.
+ */
+static void bt_core_msg_release(bt_core_msg_t *msg)
+{
+    if (msg->dtor && msg->param) {
+        msg->dtor(msg->param);
+    }
+    free(msg->param);
+    msg->param = NULL;
+}
 
 static void bt_core_task(void *arg)
 {
@@ -50,8 +71,23 @@ static void bt_core_task(void *arg)
         if (msg.work) {
             msg.work(msg.event, msg.param);
         }
-        free(msg.param);
+        bt_core_msg_release(&msg);
+
+        if (s_task_should_exit) {
+            break;
+        }
     }
+
+    /* Drain anything still queued so its nested allocations are freed, then
+     * delete ourselves. Being deleted from outside could strand a mutex that a
+     * handler was holding. */
+    bt_core_msg_t leftover;
+    while (xQueueReceive(s_queue, &leftover, 0) == pdTRUE) {
+        bt_core_msg_release(&leftover);
+    }
+
+    s_task = NULL;
+    vTaskDelete(NULL);
 }
 
 esp_err_t bt_core_task_start(void)
@@ -78,23 +114,34 @@ esp_err_t bt_core_task_start(void)
 
 void bt_core_task_stop(void)
 {
-    if (s_task != NULL) {
-        vTaskDelete(s_task);
-        s_task = NULL;
+    if (s_task == NULL) {
+        return;
     }
+
+    /* Ask the task to leave rather than deleting it from outside. A handler
+     * killed mid-run leaks its message and, worse, strands any mutex it holds
+     * -- which would deadlock every later reader of that state. */
+    s_task_should_exit = true;
+    bt_core_dispatch(NULL, 0, NULL, 0, NULL, NULL);
+
+    for (int i = 0; i < 100 && s_task != NULL; i++) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (s_task != NULL) {
+        ESP_LOGW(TAG, "app task did not exit; leaving it running");
+        s_task_should_exit = false;
+        return;
+    }
+
     if (s_queue != NULL) {
-        /* Drain first: queued messages own heap copies of their parameters. */
-        bt_core_msg_t msg;
-        while (xQueueReceive(s_queue, &msg, 0) == pdTRUE) {
-            free(msg.param);
-        }
         vQueueDelete(s_queue);
         s_queue = NULL;
     }
+    s_task_should_exit = false;
 }
 
 bool bt_core_dispatch(bt_core_work_t work, uint16_t event, void *params, int param_len,
-                      bt_core_copy_t copy)
+                      bt_core_copy_t copy, bt_core_free_t dtor)
 {
     if (s_queue == NULL) {
         ESP_LOGE(TAG, "dispatch before task start");
@@ -103,6 +150,7 @@ bool bt_core_dispatch(bt_core_work_t work, uint16_t event, void *params, int par
 
     bt_core_msg_t msg = {
         .work  = work,
+        .dtor  = dtor,
         .event = event,
         .param = NULL,
     };
@@ -121,12 +169,50 @@ bool bt_core_dispatch(bt_core_work_t work, uint16_t event, void *params, int par
         }
     }
 
-    if (xQueueSend(s_queue, &msg, pdMS_TO_TICKS(10)) != pdTRUE) {
-        ESP_LOGE(TAG, "work queue full, dropping event %u", event);
-        free(msg.param);
+    /* Zero timeout, deliberately. This runs in Bluedroid callback context: a
+     * blocking send would let a source that floods events stall the stack for
+     * 10 ms a time, which costs media packets and eventually the link. Dropping
+     * is the designed outcome. */
+    if (xQueueSend(s_queue, &msg, 0) != pdTRUE) {
+        /* Throttled: the log is a blocking UART write, and it would otherwise
+         * fire hardest exactly when the system is already saturated. */
+        const int64_t now = esp_timer_get_time();
+        if (now - s_last_drop_log_us > 1000000) {
+            s_last_drop_log_us = now;
+            ESP_LOGW(TAG, "work queue full, dropping event %u", event);
+        }
+        bt_core_msg_release(&msg);
         return false;
     }
     return true;
+}
+
+int bt_core_bond_count(void)
+{
+    return esp_bt_gap_get_bond_device_num();
+}
+
+esp_err_t bt_core_forget_bonds(void)
+{
+    const int count = esp_bt_gap_get_bond_device_num();
+    if (count <= 0) {
+        ESP_LOGI(TAG, "no bonded sources to forget");
+        return ESP_OK;
+    }
+
+    esp_bd_addr_t *list = calloc((size_t)count, sizeof(esp_bd_addr_t));
+    ESP_RETURN_ON_FALSE(list != NULL, ESP_ERR_NO_MEM, TAG, "bond list alloc failed");
+
+    int fetched = count;
+    esp_err_t err = esp_bt_gap_get_bond_device_list(&fetched, list);
+    if (err == ESP_OK) {
+        for (int i = 0; i < fetched; i++) {
+            esp_bt_gap_remove_bond_device(list[i]);
+        }
+        ESP_LOGI(TAG, "forgot %d bonded source(s)", fetched);
+    }
+    free(list);
+    return err;
 }
 
 const char *bt_core_bda_str(const uint8_t *bda, char *out, size_t size)
@@ -159,6 +245,12 @@ esp_err_t bt_core_stack_init(void)
                         "controller enable failed");
 
     esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+    /* Secure Simple Pairing, stated rather than assumed. It has no Kconfig
+     * symbol -- it is this runtime flag, and it defaults on. With it off the
+     * stack falls back to legacy PIN pairing, whose key agreement is far
+     * weaker, and which this firmware would fail anyway since it handles no
+     * PIN request event. Fail-closed either way, but on purpose now. */
+    bluedroid_cfg.ssp_en = true;
     ESP_RETURN_ON_ERROR(esp_bluedroid_init_with_cfg(&bluedroid_cfg), TAG,
                         "bluedroid init failed");
     ESP_RETURN_ON_ERROR(esp_bluedroid_enable(), TAG, "bluedroid enable failed");
