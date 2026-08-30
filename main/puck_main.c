@@ -24,6 +24,7 @@
 
 #include "audio_sink.h"
 #include "bt_core.h"
+#include "puck_avrcp.h"
 
 static const char *TAG = "puck";
 
@@ -35,6 +36,15 @@ enum {
 
 static const char *const s_conn_state[] = {"disconnected", "connecting", "connected", "disconnecting"};
 static const char *const s_audio_state[] = {"suspended", "started"};
+
+/* Runs on the application task, via AVRCP. */
+static void on_track_change(const puck_track_info_t *info)
+{
+    ESP_LOGI(TAG, "now playing: %s -- %s (%s)",
+             info->artist[0] ? info->artist : "?",
+             info->title[0] ? info->title : "?",
+             info->album[0] ? info->album : "?");
+}
 
 /**
  * @brief Translate the negotiated SBC capability bits into a sample rate.
@@ -127,6 +137,10 @@ static void handle_stack_up(uint16_t event, void *param)
     (void)param;
 
     ESP_ERROR_CHECK(esp_bt_gap_set_device_name(CONFIG_PUCK_BT_DEVICE_NAME));
+
+    /* AVRCP before A2DP: Bluedroid warns "A2DP Enable without AVRC" and skips
+     * part of its SDP record if the remote control profiles are not up yet. */
+    ESP_ERROR_CHECK(puck_avrcp_init());
     ESP_ERROR_CHECK(esp_a2d_sink_init());
 
     /* Announce ourselves as headphones so phones show the right icon and pick
@@ -228,6 +242,8 @@ void app_main(void)
 
     ESP_ERROR_CHECK(bt_core_stack_init());
     ESP_ERROR_CHECK(bt_core_task_start());
+
+    puck_avrcp_set_track_cb(on_track_change);
 
     ESP_ERROR_CHECK(esp_bt_gap_register_callback(gap_event_cb));
     ESP_ERROR_CHECK(esp_a2d_register_callback(a2dp_event_cb));

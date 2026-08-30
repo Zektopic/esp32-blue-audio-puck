@@ -59,6 +59,17 @@ esp_err_t audio_sink_stop(void);
 esp_err_t audio_sink_set_format(uint32_t sample_rate_hz, uint8_t channels);
 
 /**
+ * @brief Set playback gain from an AVRCP absolute volume value.
+ *
+ * The mapping is cubic rather than linear: volume sliders are perceptual, and
+ * a linear gain makes the bottom two thirds of the travel do almost nothing.
+ * At full scale the gain is exactly unity and the scaling pass is skipped.
+ *
+ * @param avrcp_volume  0..127, as carried by AVRCP.
+ */
+void audio_sink_set_volume(uint8_t avrcp_volume);
+
+/**
  * @brief Hand decoded PCM to the writer task. Safe to call from stack context.
  *
  * Never blocks: if the ring buffer is full the payload is dropped and counted.

@@ -45,18 +45,41 @@ typedef enum {
     RB_DROPPING,     /*!< buffer overflowed; shed payloads until it drains */
 } ringbuf_mode_t;
 
+/* Q15 fixed point: 32768 is unity gain. */
+#define GAIN_UNITY  32768
+
 typedef struct {
     i2s_chan_handle_t       tx;
     RingbufHandle_t         ringbuf;
     TaskHandle_t            writer;
     volatile bool           running;   /*!< I2S channel enabled */
     volatile ringbuf_mode_t mode;
+    volatile int32_t        gain_q15;  /*!< playback gain, GAIN_UNITY == 0 dB */
     uint32_t                sample_rate_hz;
     uint8_t                 channels;
     audio_sink_stats_t      stats;
 } audio_sink_t;
 
 static audio_sink_t s_snk;
+
+/**
+ * Scale a block of interleaved 16-bit samples in place.
+ *
+ * In place is deliberate: the block is our own ring buffer memory and is
+ * consumed immediately afterwards, so a second buffer would only cost RAM and
+ * a copy. An odd trailing byte cannot form a sample and is left alone.
+ */
+static void apply_gain(uint8_t *block, size_t bytes, int32_t gain_q15)
+{
+    int16_t *samples = (int16_t *)block;
+    const size_t count = bytes / sizeof(int16_t);
+
+    for (size_t i = 0; i < count; i++) {
+        /* Inputs are 16-bit and the gain never exceeds unity, so the product
+         * always fits in int32 and cannot clip. */
+        samples[i] = (int16_t)(((int32_t)samples[i] * gain_q15) >> 15);
+    }
+}
 
 static i2s_std_slot_config_t slot_config_for(uint8_t channels)
 {
@@ -105,6 +128,13 @@ static void writer_task(void *arg)
             continue;
         }
 
+        /* Read once: the AVRCP task can change this mid-block, and a torn
+         * gain would put a step in the middle of the waveform. */
+        const int32_t gain = s_snk.gain_q15;
+        if (gain != GAIN_UNITY) {
+            apply_gain(data, chunk, gain);
+        }
+
         size_t written = 0;
         esp_err_t err = i2s_channel_write(s_snk.tx, data, chunk, &written, portMAX_DELAY);
         vRingbufferReturnItem(s_snk.ringbuf, data);
@@ -124,6 +154,7 @@ esp_err_t audio_sink_init(void)
     s_snk.sample_rate_hz = 44100;
     s_snk.channels = 2;
     s_snk.mode = RB_PREFETCHING;
+    s_snk.gain_q15 = GAIN_UNITY;
 
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
     /* Emit silence rather than the last DMA contents if the buffer starves. */
@@ -259,6 +290,29 @@ esp_err_t audio_sink_set_format(uint32_t sample_rate_hz, uint8_t channels)
         ESP_RETURN_ON_ERROR(audio_sink_start(), TAG, "restart after reconfigure failed");
     }
     return ESP_OK;
+}
+
+void audio_sink_set_volume(uint8_t avrcp_volume)
+{
+    if (avrcp_volume > 0x7f) {
+        avrcp_volume = 0x7f;
+    }
+
+    int32_t gain;
+    if (avrcp_volume == 0) {
+        gain = 0;
+    } else if (avrcp_volume == 0x7f) {
+        gain = GAIN_UNITY;
+    } else {
+        /* Cubic taper, computed once per volume change rather than per sample.
+         * The float cost here is irrelevant; in the writer loop it would not
+         * be. */
+        const float norm = (float)avrcp_volume / 127.0f;
+        gain = (int32_t)(GAIN_UNITY * norm * norm * norm);
+    }
+
+    s_snk.gain_q15 = gain;
+    ESP_LOGD(TAG, "volume %u -> gain %" PRId32 "/%d", avrcp_volume, gain, GAIN_UNITY);
 }
 
 size_t audio_sink_write(const uint8_t *data, size_t size)

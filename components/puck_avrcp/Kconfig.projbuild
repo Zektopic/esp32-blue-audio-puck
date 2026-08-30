@@ -1,0 +1,12 @@
+menu "BlueAudio Puck: remote control"
+
+    config PUCK_DEFAULT_VOLUME
+        int "Volume at power-on (0-127)"
+        default 96
+        range 0 127
+        help
+            AVRCP absolute volume applied before a source connects. Most
+            sources push their own value shortly after connecting, so this only
+            governs the first moment of playback. 96 is about 75%.
+
+endmenu
