@@ -1,0 +1,56 @@
+menu "BlueAudio Puck: battery"
+
+    config PUCK_BATTERY_ADC_GPIO
+        int "Battery sense GPIO (-1 if not fitted)"
+        default -1
+        range -1 39
+        help
+            Must be an ADC1 pin: 32-39. ADC2 is shared with the Wi-Fi radio and
+            is unavailable whenever Wi-Fi is active, so it is not accepted here
+            even though this firmware does not currently use Wi-Fi.
+
+            GPIO 35 is a good choice on a devkit: input-only, so it cannot be
+            driven by mistake, and it is rarely used for anything else.
+
+            Left at -1 the firmware reports "USB powered" and never samples.
+
+    config PUCK_BATTERY_DIVIDER_RATIO_X100
+        int "Divider ratio, times 100"
+        default 200
+        range 100 1000
+        help
+            Cell voltage divided by pin voltage, times 100. Two equal resistors
+            give a 2:1 divider, so 200. For other pairs the ratio is
+            (R_top + R_bottom) / R_bottom.
+
+            A full Li-po is 4.2 V and the ADC tops out near 3.1 V at 11 dB
+            attenuation, so the divider must be at least about 1.4:1. 2:1 with
+            two 100k resistors is the usual choice: it fits comfortably and
+            draws only ~21 uA.
+
+            Set this to match the resistors you actually fitted. A percentage
+            from a wrong ratio is worse than no percentage at all.
+
+    config PUCK_BATTERY_INTERVAL_SECONDS
+        int "Seconds between samples"
+        default 30
+        range 1 600
+        help
+            Battery voltage moves slowly. Sampling often costs power and makes
+            the on-screen percentage jitter with playback load.
+
+    config PUCK_BATTERY_LOW_PERCENT
+        int "Warn below this percentage"
+        default 20
+        range 1 90
+
+    config PUCK_BATTERY_CRITICAL_PERCENT
+        int "Treat as critical below this percentage"
+        default 5
+        range 1 50
+        help
+            At this level the firmware reports PUCK_BATTERY_CRITICAL so the UI
+            can warn. It does not shut down on its own -- cutting the audio out
+            from under someone is worse than running the cell a little lower.
+
+endmenu
