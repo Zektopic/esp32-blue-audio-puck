@@ -23,25 +23,37 @@ typedef enum {
     PUCK_UI_FAULT,        /*!< triple flash: something failed to start */
 } puck_ui_state_t;
 
-/** Gestures the main button can produce. */
+/**
+ * The three front-panel buttons.
+ *
+ * Named by position rather than by function on purpose. What a press *means*
+ * is the application's business -- this component only reports which button
+ * moved and how long it was held.
+ */
 typedef enum {
-    PUCK_UI_PRESS_SINGLE = 0,
-    PUCK_UI_PRESS_DOUBLE,
-    PUCK_UI_PRESS_TRIPLE,
-    PUCK_UI_PRESS_LONG,     /*!< held past the long-press threshold */
-    PUCK_UI_PRESS_VERY_LONG,/*!< held much longer: destructive actions */
-    PUCK_UI_VOLUME_UP,      /*!< optional volume button, repeats while held */
-    PUCK_UI_VOLUME_DOWN,
-} puck_ui_gesture_t;
+    PUCK_UI_BUTTON_1 = 0,
+    PUCK_UI_BUTTON_2,
+    PUCK_UI_BUTTON_3,
+    PUCK_UI_BUTTON_COUNT,
+} puck_ui_button_t;
 
-/** Called on the UI task when a gesture completes. */
-typedef void (*puck_ui_gesture_cb_t)(puck_ui_gesture_t gesture);
+/** What a button did. */
+typedef enum {
+    PUCK_UI_TAP = 0,      /*!< released before the hold threshold */
+    PUCK_UI_HOLD,         /*!< crossed the hold threshold, still down */
+    PUCK_UI_HOLD_REPEAT,  /*!< still down; repeats for continuous actions */
+    PUCK_UI_HOLD_EXTRA,   /*!< crossed a much longer threshold */
+} puck_ui_event_t;
+
+/** Called on the UI task. */
+typedef void (*puck_ui_button_cb_t)(puck_ui_button_t button, puck_ui_event_t event);
 
 /**
- * @brief Configure the button(s) and status LED and start the UI task.
+ * @brief Configure the buttons and status LED and start the UI task.
  *
- * Buttons are inputs with pull-ups, active low. Buttons configured to GPIO -1
- * are skipped, so a build with no volume buttons costs nothing.
+ * Buttons are inputs with pull-ups, active low: wire each one between its pin
+ * and ground, no external resistor. A button configured to GPIO -1 is skipped,
+ * so a two-button build costs nothing.
  */
 esp_err_t puck_ui_init(void);
 
@@ -56,9 +68,9 @@ void puck_ui_set_state(puck_ui_state_t state);
 puck_ui_state_t puck_ui_get_state(void);
 
 /**
- * @brief Register the gesture handler.
+ * @brief Register the button handler.
  */
-void puck_ui_set_gesture_cb(puck_ui_gesture_cb_t cb);
+void puck_ui_set_button_cb(puck_ui_button_cb_t cb);
 
 #ifdef __cplusplus
 }

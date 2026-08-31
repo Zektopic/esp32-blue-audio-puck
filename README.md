@@ -121,7 +121,9 @@ convenient on a breadboard.
 | GPIO 2 | I²S DATA | PCM5102A `DIN` |
 | GPIO 21 | I²C SDA | SSD1306 `SDA` |
 | GPIO 22 | I²C SCL | SSD1306 `SCL` |
-| GPIO 33 | Button | to GND (an RTC pin, so it wakes from deep sleep) |
+| GPIO 32 | BT1 | to GND — next track / volume up |
+| GPIO 33 | BT2 | to GND — play/pause / pairing (RTC pin, wakes from deep sleep) |
+| GPIO 27 | BT3 | to GND — previous track / volume down |
 | GPIO 35 | Battery sense | divider midpoint (optional, unfitted by default) |
 | 3V3, GND | Power | both boards |
 
@@ -187,13 +189,14 @@ I (1373) puck: no bonded sources; discoverable as "BlueAudio Puck"
 
 ## Using it
 
-| Gesture | Action |
-| --- | --- |
-| Single press | Play / pause |
-| Double press | Next track |
-| Triple press | Previous track |
-| Hold 1.5 s | Open a pairing window (120 s) |
-| Hold 5 s | Forget every bonded source, then reopen pairing |
+| Button | Tap | Hold |
+| --- | --- | --- |
+| **BT1** | Next track | Volume up — repeats while held |
+| **BT2** | Play / pause | Pairing window (1.5 s) · forget all bonds (5 s) |
+| **BT3** | Previous track | Volume down — repeats while held |
+
+One action per press, no multi-tap timing to get right. Holding a volume button
+sweeps rather than nudging once, at roughly four seconds end to end.
 
 ### The screen
 
@@ -256,6 +259,8 @@ All under `idf.py menuconfig` → **BlueAudio Puck**. Every GPIO accepts `-1` fo
 | `PUCK_RSSI_POLL_SECONDS` | 3 | How often the signal meter updates |
 | `PUCK_BATTERY_ADC_GPIO` | -1 | ADC1 pins only (32–39) |
 | `PUCK_BATTERY_DIVIDER_RATIO_X100` | 200 | 2:1; must match your resistors |
+| `PUCK_BT1/BT2/BT3_GPIO` | 32 / 33 / 27 | Active low, internal pull-up |
+| `PUCK_VOLUME_STEP` | 6 | Per repeat, of 127 |
 | `PUCK_LED_GPIO` | -1 | GPIO 2 is now I²S data |
 | `PUCK_I2S_SLOT_FORMAT` | Philips | Must match the DAC's `FMT` pin |
 | `PUCK_I2S_USE_APLL` | on | Accurate 44.1 kHz, slightly more current |

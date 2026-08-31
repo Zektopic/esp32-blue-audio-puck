@@ -1,25 +1,30 @@
 menu "BlueAudio Puck: buttons and LED"
 
-    config PUCK_BUTTON_GPIO
-        int "Main button GPIO (-1 if not fitted)"
+    comment "Buttons are active low: wire each between its pin and GND."
+
+    config PUCK_BT1_GPIO
+        int "BT1 GPIO -- next track, hold for volume up (-1 if not fitted)"
+        default 32
+        range -1 39
+        help
+            Internal pull-up, active low. No external resistor needed.
+
+            Avoid GPIO 34-39: those pins are input-only AND have no internal
+            pull-up, so a button on them floats unless you fit your own
+            resistor.
+
+    config PUCK_BT2_GPIO
+        int "BT2 GPIO -- play/pause, hold to pair (-1 if not fitted)"
         default 33
         range -1 39
         help
-            Wired to ground through the switch; the internal pull-up holds it
-            high when open. GPIO 33 is also an RTC pin, so it can wake the chip
-            from deep sleep later.
+            The main button. GPIO 33 is an RTC pin, which is why this one is
+            the deep-sleep wake source: ext0 can only watch a single pin, so
+            the button people reach for first gets it.
 
-    config PUCK_VOLUME_UP_GPIO
-        int "Volume up button GPIO (-1 if not fitted)"
-        default -1
-        range -1 39
-        help
-            Optional. Volume normally comes from the phone over AVRCP, so this
-            is only needed if you want the puck itself to have volume keys.
-
-    config PUCK_VOLUME_DOWN_GPIO
-        int "Volume down button GPIO (-1 if not fitted)"
-        default -1
+    config PUCK_BT3_GPIO
+        int "BT3 GPIO -- previous track, hold for volume down (-1 if not fitted)"
+        default 27
         range -1 39
 
     config PUCK_LED_GPIO
@@ -31,9 +36,9 @@ menu "BlueAudio Puck: buttons and LED"
             blink. Must be an output-capable pin: GPIO 34-39 are input only.
 
             Defaults to "not fitted" because GPIO 2 -- the on-board LED on most
-            devkits -- now carries I2S data. An external LED on a free pin such
-            as 27 works; with the OLED fitted the LED is largely redundant
-            anyway, since the screen shows the same states in words.
+            devkits -- carries I2S data. With the OLED fitted the LED is
+            largely redundant anyway, since the screen shows the same states in
+            words. Note GPIO 27 is BT3 by default, so pick something else.
 
     config PUCK_LED_ACTIVE_LOW
         bool "Status LED is active low"
@@ -43,11 +48,12 @@ menu "BlueAudio Puck: buttons and LED"
             between the pin and ground.
 
     config PUCK_VOLUME_STEP
-        int "Volume change per button press"
-        default 8
+        int "Volume change per repeat while a volume button is held"
+        default 6
         range 1 32
         help
-            In AVRCP units, where full scale is 127. 8 gives 16 steps across
-            the range.
+            In AVRCP units, where full scale is 127. Held buttons repeat every
+            180 ms, so 6 sweeps the whole range in about four seconds -- fast
+            enough to be useful, slow enough to stop where you meant to.
 
 endmenu
