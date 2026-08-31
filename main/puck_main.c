@@ -119,42 +119,70 @@ static void forget_and_repair(void)
     enter_pairing_mode();
 }
 
-/* Runs on the UI task. */
-static void on_gesture(puck_ui_gesture_t gesture)
+/**
+ * @brief Step the volume and show where it landed.
+ *
+ * Called for the first hold and for every repeat after it, so holding a volume
+ * button sweeps rather than nudging once.
+ */
+static void adjust_volume(int step)
+{
+    puck_avrcp_adjust_volume(step);
+
+    char msg[22];
+    snprintf(msg, sizeof(msg), "Volume %u%%",
+             (unsigned)puck_avrcp_get_volume() * 100u / PUCK_VOLUME_MAX);
+    puck_display_toast(msg, 1200);
+}
+
+/*
+ * Runs on the UI task.
+ *
+ * Three buttons, each doing one thing on a tap and one thing on a hold. The
+ * previous single-button scheme piled next and previous onto double and triple
+ * taps, which meant every skip was a timing test and a bounced contact turned
+ * play/pause into a track change.
+ *
+ *   BT1  tap: next track       hold: volume up
+ *   BT2  tap: play/pause       hold: pairing        very long: forget bonds
+ *   BT3  tap: previous track   hold: volume down
+ */
+static void on_button(puck_ui_button_t button, puck_ui_event_t event)
 {
     /* Any deliberate interaction is a reason not to shut down yet. */
     puck_power_kick();
 
-    switch (gesture) {
-    case PUCK_UI_PRESS_SINGLE:
-        /* One button, so play and pause share it: ask for whichever the
-         * source is not currently doing. */
-        ESP_ERROR_CHECK_WITHOUT_ABORT(
-            puck_avrcp_send_key(puck_avrcp_is_playing() ? ESP_AVRC_PT_CMD_PAUSE
-                                                        : ESP_AVRC_PT_CMD_PLAY));
+    switch (button) {
+    case PUCK_UI_BUTTON_1:
+        if (event == PUCK_UI_TAP) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(puck_avrcp_send_key(ESP_AVRC_PT_CMD_FORWARD));
+        } else if (event == PUCK_UI_HOLD || event == PUCK_UI_HOLD_REPEAT) {
+            adjust_volume(CONFIG_PUCK_VOLUME_STEP);
+        }
         break;
-    case PUCK_UI_PRESS_DOUBLE:
-        ESP_ERROR_CHECK_WITHOUT_ABORT(puck_avrcp_send_key(ESP_AVRC_PT_CMD_FORWARD));
+
+    case PUCK_UI_BUTTON_2:
+        if (event == PUCK_UI_TAP) {
+            /* Play and pause share the button, so ask for whichever the source
+             * is not currently doing. */
+            ESP_ERROR_CHECK_WITHOUT_ABORT(
+                puck_avrcp_send_key(puck_avrcp_is_playing() ? ESP_AVRC_PT_CMD_PAUSE
+                                                            : ESP_AVRC_PT_CMD_PLAY));
+        } else if (event == PUCK_UI_HOLD) {
+            enter_pairing_mode();
+        } else if (event == PUCK_UI_HOLD_EXTRA) {
+            forget_and_repair();
+        }
         break;
-    case PUCK_UI_PRESS_TRIPLE:
-        ESP_ERROR_CHECK_WITHOUT_ABORT(puck_avrcp_send_key(ESP_AVRC_PT_CMD_BACKWARD));
+
+    case PUCK_UI_BUTTON_3:
+        if (event == PUCK_UI_TAP) {
+            ESP_ERROR_CHECK_WITHOUT_ABORT(puck_avrcp_send_key(ESP_AVRC_PT_CMD_BACKWARD));
+        } else if (event == PUCK_UI_HOLD || event == PUCK_UI_HOLD_REPEAT) {
+            adjust_volume(-CONFIG_PUCK_VOLUME_STEP);
+        }
         break;
-    case PUCK_UI_PRESS_LONG:
-        enter_pairing_mode();
-        break;
-    case PUCK_UI_PRESS_VERY_LONG:
-        forget_and_repair();
-        break;
-    case PUCK_UI_VOLUME_UP:
-    case PUCK_UI_VOLUME_DOWN: {
-        puck_avrcp_adjust_volume(gesture == PUCK_UI_VOLUME_UP ? CONFIG_PUCK_VOLUME_STEP
-                                                              : -CONFIG_PUCK_VOLUME_STEP);
-        char msg[22];
-        snprintf(msg, sizeof(msg), "Volume %u%%",
-                 (unsigned)puck_avrcp_get_volume() * 100u / PUCK_VOLUME_MAX);
-        puck_display_toast(msg, 1200);
-        break;
-    }
+
     default:
         break;
     }
@@ -465,7 +493,7 @@ void app_main(void)
     ESP_ERROR_CHECK(puck_display_init());
 
     ESP_ERROR_CHECK(puck_ui_init());
-    puck_ui_set_gesture_cb(on_gesture);
+    puck_ui_set_button_cb(on_button);
 
     puck_avrcp_set_track_cb(on_track_change);
 

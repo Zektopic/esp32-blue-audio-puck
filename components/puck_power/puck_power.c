@@ -177,18 +177,22 @@ void puck_power_sleep_now(void)
     esp_bt_controller_disable();
     esp_bt_controller_deinit();
 
-    if (CONFIG_PUCK_BUTTON_GPIO >= 0) {
+    /* BT2 is the wake source. ext0 watches exactly one pin, and on the ESP32
+     * ext1 can only wake on "all low" or "any high" -- neither of which means
+     * "any of three active-low buttons pressed". So the button people reach
+     * for first gets the job. */
+    if (CONFIG_PUCK_BT2_GPIO >= 0) {
         /* ext0 wakes on a level, and the button pulls its pin low. The RTC
          * pull-up has to be asked for separately: the digital pull-up
          * configured by the UI code does not survive into deep sleep, and
          * without it the pin floats and the chip wakes immediately. */
-        const gpio_num_t wake_pin = (gpio_num_t)CONFIG_PUCK_BUTTON_GPIO;
+        const gpio_num_t wake_pin = (gpio_num_t)CONFIG_PUCK_BT2_GPIO;
         if (esp_sleep_enable_ext0_wakeup(wake_pin, 0) == ESP_OK) {
             rtc_gpio_pullup_en(wake_pin);
             rtc_gpio_pulldown_dis(wake_pin);
         } else {
             ESP_LOGE(TAG, "GPIO %d cannot wake from deep sleep -- not an RTC pin",
-                     CONFIG_PUCK_BUTTON_GPIO);
+                     CONFIG_PUCK_BT2_GPIO);
         }
     } else {
         ESP_LOGW(TAG, "no button fitted: only a reset will wake the puck");
