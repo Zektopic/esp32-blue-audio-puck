@@ -24,6 +24,19 @@ Design intent, and where it departs from docs/hardware.md:
     32 ohm headphones but quiet, exactly as hardware.md warns. A TPA6132A2 is
     the revision B addition; it is QFN-16 and would make this board much harder
     to assemble by hand.
+  * Auto-reset. Q1 and Q2 are the cross-coupled pair every ESP devkit uses, so
+    esptool can reset the chip and pull it into the bootloader without anyone
+    holding a button. The behaviour that matters is that opening a serial port
+    which asserts *both* DTR and RTS must NOT reset the chip:
+
+        DTR RTS  Q1(EN)  Q2(IO0)  result
+         1   1    off     off     runs normally
+         0   0    off     off     runs normally
+         1   0    off     ON      IO0 low  -> bootloader
+         0   1    ON      off     EN  low  -> reset
+
+    No base resistors, matching the NodeMCU/devkit reference this copies. SW3
+    is still fitted as the manual fallback.
   * JP1 sits in series with I2S data on GPIO 2. That pin is a boot strapping
     pin, and a DAC loading it is why the prototype needs BOOT held to flash.
     Lift the jumper and the board flashes normally.
@@ -59,12 +72,20 @@ PARTS = {
            "BATT", "Li-po cell"),
     "J5": ("Connector", "Conn_01x06_Pin",
            "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
-           "PROG", "3V3 GND EN IO0 TXD RXD"),
+           "PROG", "GND 3V3 RXD TXD DTR RTS -- plugs onto a CP2102/FTDI adapter"),
 
     "SW1": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
             "MODE", "Play/pause, track skip, pairing"),
     "SW2": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
             "RESET", "Pulls EN low"),
+    "SW3": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
+            "BOOT", "Pulls IO0 low; the manual fallback if auto-reset misbehaves"),
+
+    # Cross-coupled auto-reset pair. See AUTO_RESET_TRUTH_TABLE below.
+    "Q1": ("Transistor_BJT", "MMBT3904", "Package_TO_SOT_SMD:SOT-23",
+           "MMBT3904", "Auto-reset: drives EN from DTR/RTS"),
+    "Q2": ("Transistor_BJT", "MMBT3904", "Package_TO_SOT_SMD:SOT-23",
+           "MMBT3904", "Auto-reset: drives IO0 from DTR/RTS"),
 
     "D1": ("Device", "LED", "LED_SMD:LED_0805_2012Metric", "CHG",
            "Charge status from the MCP73831"),
@@ -119,8 +140,8 @@ NETS = {
         ("U2", "16"), ("U2", "19"),
         ("U3", "2"), ("U4", "2"), ("U5", "2"),
         ("J1", "A1"), ("J1", "A12"), ("J1", "B1"), ("J1", "B12"), ("J1", "SH"),
-        ("J2", "S"), ("J3", "1"), ("J4", "2"), ("J5", "2"),
-        ("SW1", "2"), ("SW2", "2"),
+        ("J2", "S"), ("J3", "1"), ("J4", "2"), ("J5", "1"),
+        ("SW1", "2"), ("SW2", "2"), ("SW3", "2"),
         ("R3", "2"), ("R4", "2"), ("R8", "2"),
         ("C1", "2"), ("C2", "2"), ("C3", "2"), ("C4", "2"), ("C5", "2"),
         ("C6", "2"), ("C7", "2"), ("C9", "2"), ("C10", "2"), ("C11", "2"),
@@ -143,7 +164,7 @@ NETS = {
         ("U1", "2"), ("C1", "1"), ("C2", "1"),
         ("U2", "20"), ("C4", "1"),
         ("R1", "1"), ("R2", "1"), ("R9", "1"),
-        ("J3", "2"), ("J5", "1"),
+        ("J3", "2"), ("J5", "2"),
     ],
     "+3V3A": [                     # analogue rail, DAC only
         ("U5", "5"), ("U5", "3"), ("C16", "1"),
@@ -152,10 +173,17 @@ NETS = {
     ],
     "U5_BYPASS": [("U5", "4"), ("C17", "1")],
 
-    "EN": [("U1", "3"), ("R1", "2"), ("C3", "1"), ("SW2", "1"), ("J5", "3")],
-    "IO0": [("U1", "25"), ("R2", "2"), ("J5", "4")],
-    "TXD0": [("U1", "35"), ("J5", "5")],
-    "RXD0": [("U1", "34"), ("J5", "6")],
+    # EN and IO0 are no longer brought out to the header: the transistors
+    # derive them, and exposing both would let an adapter fight them.
+    "EN": [("U1", "3"), ("R1", "2"), ("C3", "1"), ("SW2", "1"), ("Q1", "3")],
+    "IO0": [("U1", "25"), ("R2", "2"), ("SW3", "1"), ("Q2", "3")],
+    "RXD0": [("U1", "34"), ("J5", "3")],
+    "TXD0": [("U1", "35"), ("J5", "4")],
+
+    # Q1 base = RTS, emitter = DTR; Q2 base = DTR, emitter = RTS. The
+    # cross-coupling is the whole trick -- see AUTO_RESET_TRUTH_TABLE.
+    "DTR": [("J5", "5"), ("Q1", "2"), ("Q2", "1")],
+    "RTS": [("J5", "6"), ("Q2", "2"), ("Q1", "1")],
 
     "I2S_BCK": [("U1", "26"), ("U2", "13")],
     "I2S_LRCK": [("U1", "23"), ("U2", "15")],
@@ -204,6 +232,29 @@ NO_CONNECT = [
 # is what makes the jack mechanically and electrically quiet.
 MECHANICAL_TO_GND = ["J1"]
 
+# Bypass capacitors and the pin each one serves. A decoupling cap 20 mm from
+# its pin is not decoupling anything -- the loop inductance defeats the point
+# entirely -- so the placer puts each of these hard against its target pad
+# rather than filing it under "power components".
+DECOUPLING = {
+    "C1": ("U1", "2"),      # ESP32 VDD
+    "C2": ("U1", "2"),      # ESP32 bulk
+    "C4": ("U2", "20"),     # DAC DVDD
+    "C5": ("U2", "8"),      # DAC AVDD
+    "C6": ("U2", "8"),      # DAC AVDD bulk
+    "C7": ("U2", "1"),      # DAC CPVDD
+    "C8": ("U2", "2"),      # charge pump flying cap -- the tightest loop here
+    "C9": ("U2", "5"),      # VNEG reservoir
+    "C10": ("U2", "18"),    # DAC internal LDO
+    "C11": ("U3", "4"),     # charger input
+    "C12": ("U3", "3"),     # charger output
+    "C13": ("U4", "1"),     # digital LDO input
+    "C14": ("U4", "5"),     # digital LDO output
+    "C15": ("U5", "1"),     # analogue LDO input
+    "C16": ("U5", "5"),     # analogue LDO output
+    "C17": ("U5", "4"),     # analogue LDO bypass -- what makes it low noise
+}
+
 BOARD = {
     "name": "BlueAudio Puck carrier, rev A",
     # 60 x 55 leaves room to place every part on the front. Moving the
@@ -229,6 +280,48 @@ def pin_to_net():
     return out
 
 
+def auto_reset_truth_table():
+    """
+    Derive the auto-reset behaviour from the netlist and check it.
+
+    Reasoning about a cross-coupled pair from memory is how people ship boards
+    that reset every time a terminal opens. This reads the actual connectivity
+    -- which net is on each transistor's base, emitter and collector -- and
+    works out what happens for all four DTR/RTS combinations. MMBT3904 pins are
+    1=B, 2=E, 3=C.
+    """
+    mapping = pin_to_net()
+    rows = []
+
+    for dtr in (0, 1):
+        for rts in (0, 1):
+            levels = {"DTR": dtr, "RTS": rts}
+            state = {}
+            for q, driven in (("Q1", "EN"), ("Q2", "IO0")):
+                base = mapping[(q, "1")]
+                emitter = mapping[(q, "2")]
+                collector = mapping[(q, "3")]
+                if collector != driven:
+                    raise ValueError("%s collector is on %s, expected %s"
+                                     % (q, collector, driven))
+                # An NPN conducts when its base sits above its emitter.
+                on = levels.get(base, 0) > levels.get(emitter, 0)
+                # A conducting transistor pulls its collector to its emitter;
+                # otherwise the pull-up holds the pin high.
+                state[driven] = levels.get(emitter, 0) if on else 1
+            rows.append((dtr, rts, state["EN"], state["IO0"]))
+    return rows
+
+
+AUTO_RESET_EXPECTED = [
+    # dtr rts  EN IO0
+    (0, 0, 1, 1),   # both deasserted: runs
+    (0, 1, 0, 1),   # EN low: reset
+    (1, 0, 1, 0),   # IO0 low: bootloader
+    (1, 1, 1, 1),   # both asserted: runs -- opening a port must not reset
+]
+
+
 def check():
     """Catch the mistakes that are cheap to make in a table this size."""
     problems = []
@@ -247,6 +340,17 @@ def check():
             problems.append("%s.%s is both no-connect and on net %s"
                             % (ref, pin, mapping[(ref, pin)]))
 
+    if sorted(auto_reset_truth_table()) != sorted(AUTO_RESET_EXPECTED):
+        problems.append("auto-reset truth table is wrong: %s"
+                        % (auto_reset_truth_table(),))
+
+    for cap, (ic, pin) in DECOUPLING.items():
+        if cap not in PARTS or ic not in PARTS:
+            problems.append("decoupling entry %s -> %s.%s names an unknown part"
+                            % (cap, ic, pin))
+        elif (ic, pin) not in mapping:
+            problems.append("decoupling target %s.%s is on no net" % (ic, pin))
+
     return sorted(set(problems))
 
 
@@ -260,3 +364,8 @@ if __name__ == "__main__":
             print("  -", p)
         raise SystemExit(1)
     print("netlist self-check passed")
+    print("auto-reset truth table (DTR RTS -> EN IO0):")
+    for dtr, rts, en, io0 in sorted(auto_reset_truth_table()):
+        what = ("runs" if (en and io0) else
+                "RESET" if not en else "BOOTLOADER")
+        print("   %d   %d  ->  %d  %d   %s" % (dtr, rts, en, io0, what))
