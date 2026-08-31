@@ -295,6 +295,7 @@ regulator dominate a devkit's draw whatever the firmware does.
 
 ## Documentation
 
+- [hardware/](hardware/) — KiCad schematic and PCB for a single-board version (unrouted, unfabricated)
 - [docs/hardware.md](docs/hardware.md) — parts, wiring, power budget, board roadmap
 - [docs/design-notes.md](docs/design-notes.md) — why the firmware is shaped this way, and the IDF bugs it avoids
 - [docs/troubleshooting.md](docs/troubleshooting.md) — no sound, no pairing, dropouts, build failures

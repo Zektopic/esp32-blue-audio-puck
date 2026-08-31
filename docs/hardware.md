@@ -244,6 +244,13 @@ flowchart LR
     P2 --> P3["Phase 3<br/>custom PCB<br/>printed enclosure"]
 ```
 
+A KiCad schematic and board for phases 1 and 2 combined live in
+[../hardware/](../hardware/): ESP32-WROOM-32U, PCM5102A, MCP73831 charging and
+the two separate 3V3 rails this page argues for. It is **unrouted and
+unfabricated**, and it departs from this page in two places -- LDOs instead of
+the buck-boost, and no headphone amplifier -- both explained in
+[../hardware/README.md](../hardware/README.md).
+
 Nothing in the firmware is wasted if the brain changes later: the DAC, power,
 enclosure and UI work all carry over, and only `bt_core` and `puck_avrcp` are
 Bluetooth-specific.
