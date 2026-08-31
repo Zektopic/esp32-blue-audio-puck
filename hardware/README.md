@@ -15,15 +15,17 @@ output — 60 × 55 mm.
 
 ## Read this before you order anything
 
-> [!WARNING]
-> **The board is not routed.** There are no tracks and no copper pours. Every
-> footprint is placed and every pad carries its correct net, so opening it in
-> Pcbnew shows a complete ratsnest — but nothing is connected in copper yet.
+> [!CAUTION]
+> **This board is not finished, and it is not fabricable as it stands.**
 >
-> That is deliberate. A half-routed board looks finished and is worse than an
-> obviously unrouted one, and the analogue section here needs judgement — star
-> ground, keeping the DAC's return path away from the radio, the charge pump's
-> flying capacitor loop — that does not come out of arithmetic.
+> It is *mostly* routed — 228 track segments, 72 vias, ground pours on both
+> layers — but DRC reports **23 electrical errors** (18 clearance, 4 hole
+> clearance, 1 short) and **two nets that failed to route at all: `RTS` and
+> `VBUS`**.
+>
+> This is exactly the state this file used to warn against: a half-routed board
+> looks finished. It is written down here in numbers so nobody mistakes it for
+> done. Do not send these files to a fab.
 
 > [!WARNING]
 > **Nothing here has been fabricated or tested.** It passes ERC and the DRC
@@ -39,12 +41,28 @@ $ kicad-cli sch erc --severity-error --severity-warning
 Found 2 violations                    # both lib_symbol_mismatch, see below
 
 $ kicad-cli pcb drc --severity-error --severity-warning
-Found 59 violations                   # 38 silk-over-copper, 21 silk overlap
-Found 111 unconnected items           # expected: the board is not routed
+Found 49 violations
+Found 10 unconnected items
 ```
 
-**Zero electrical errors.** No unconnected pins, no dangling labels, no
-clearance violations, no shorts, no malformed outline.
+The schematic is clean: **zero electrical errors**, no unconnected pins, no
+dangling labels, no malformed outline.
+
+The board is not. Breaking the 49 down:
+
+| Count | Kind | Status |
+| --- | --- | --- |
+| 18 | `clearance` | **Must fix** — copper too close |
+| 4 | `hole_clearance` | **Must fix** — a drill too near copper |
+| 1 | `shorting_items` | **Must fix** — two nets touching |
+| 10 | `unconnected_items` | **Must fix** — `RTS` and `VBUS` never routed |
+| 15 | `silk_over_copper` | Cosmetic; every fab ignores it |
+| 11 | `silk_overlap` | Cosmetic |
+
+The router in `scripts/route.py` gets 29 of 31 nets down. `RTS` and `VBUS` both
+run into congestion it cannot back out of — it routes nets in order and never
+rips up an earlier one to make room, which is the difference between this and a
+real autorouter.
 
 The two ERC warnings are `lib_symbol_mismatch` on `AP2112K-3.3` and
 `LP2985-3.3`. Both are KiCad *derived* symbols (`extends`), and the generator
@@ -132,14 +150,22 @@ addition, and it is QFN-16 — it would make this board far harder to hand-build
 
 ## What is left to do
 
-1. **Route it.** Two layers is enough. Ground pour on the back, keep the DAC's
-   analogue return separate from the radio's, keep C8 (the charge pump's flying
-   capacitor) loop tight.
-2. **Check the antenna keep-out.** The WROOM-32U has an external connector so
+1. **Fix the 23 electrical errors and route `RTS` and `VBUS`.** Either by hand
+   in Pcbnew, or by giving `scripts/route.py` the ability to rip up and retry.
+   Opening the board and routing two nets by hand is the shorter path.
+2. **Apply JLCPCB's constraints.** Their standard two-layer process does
+   0.127 mm track and space, 0.2 mm minimum drill, 0.5 mm hole-to-hole, and
+   0.2 mm trace-to-outline. The board is currently drawn to KiCad's defaults
+   (0.2 mm clearance, 0.3 mm drill), which is *inside* those limits and so
+   safe — but the rules are not written down in the project file, so nothing
+   enforces them.
+3. **Add BT1 and BT3.** The firmware now has three user buttons; this board
+   still has one (`SW1`, MODE). A netlist change in `design.py`.
+4. **Check the antenna keep-out.** The WROOM-32U has an external connector so
    there is no PCB antenna to clear, but leave the module's edge unpoured.
-3. **Re-run DRC** once routed, with track width and clearance set for your fab.
-4. **Review against datasheets.** Especially the MCP73831 programming resistor
+5. **Re-run DRC** and get it to zero before ordering anything.
+6. **Review against datasheets.** Especially the MCP73831 programming resistor
    (R5 = 2 kΩ, about 500 mA) against your cell's charge rate.
-5. **Rounded corners** were dropped — arcs whose endpoints did not meet left the
+7. **Rounded corners** were dropped — arcs whose endpoints did not meet left the
    outline open, and KiCad will not guess. Add them in Pcbnew, where the editor
    keeps the ends joined.
