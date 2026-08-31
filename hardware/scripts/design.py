@@ -37,6 +37,15 @@ Design intent, and where it departs from docs/hardware.md:
 
     No base resistors, matching the NodeMCU/devkit reference this copies. SW3
     is still fitted as the manual fallback.
+  * Three user buttons on GPIO 32/33/27, matching the firmware: BT1 taps for
+    next and holds for volume up, BT2 taps for play/pause and holds for
+    pairing, BT3 taps for previous and holds for volume down. All active low
+    straight to ground; the internal pull-ups mean no external resistors.
+
+    Note there is no LED on GPIO 27 here. The Kconfig help for PUCK_LED_GPIO
+    suggests 27 for an external status LED, which would collide with BT3 on a
+    breadboard -- on this board the only LED is D1, the charge indicator on
+    CHG_STAT, so the pin is unambiguously BT3.
   * JP1 sits in series with I2S data on GPIO 2. That pin is a boot strapping
     pin, and a DAC loading it is why the prototype needs BOOT held to flash.
     Lift the jumper and the board flashes normally.
@@ -74,11 +83,17 @@ PARTS = {
            "Connector_PinHeader_2.54mm:PinHeader_1x06_P2.54mm_Vertical",
            "PROG", "GND 3V3 RXD TXD DTR RTS -- plugs onto a CP2102/FTDI adapter"),
 
+    # Three user buttons. Each is active low straight to ground -- the ESP32's
+    # internal pull-ups hold them high, so no external resistors.
     "SW1": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
-            "MODE", "Play/pause, track skip, pairing"),
+            "BT1", "Tap: next track. Hold: volume up"),
     "SW2": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
-            "RESET", "Pulls EN low"),
+            "BT2", "Tap: play/pause. Hold: pairing. 5 s: forget bonds"),
     "SW3": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
+            "BT3", "Tap: previous track. Hold: volume down"),
+    "SW4": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
+            "RESET", "Pulls EN low"),
+    "SW5": ("Switch", "SW_Push", "Button_Switch_SMD:Panasonic_EVQPUJ_EVQPUA",
             "BOOT", "Pulls IO0 low; the manual fallback if auto-reset misbehaves"),
 
     # Cross-coupled auto-reset pair. See AUTO_RESET_TRUTH_TABLE below.
@@ -141,7 +156,7 @@ NETS = {
         ("U3", "2"), ("U4", "2"), ("U5", "2"),
         ("J1", "A1"), ("J1", "A12"), ("J1", "B1"), ("J1", "B12"), ("J1", "SH"),
         ("J2", "S"), ("J3", "1"), ("J4", "2"), ("J5", "1"),
-        ("SW1", "2"), ("SW2", "2"), ("SW3", "2"),
+        ("SW1", "2"), ("SW2", "2"), ("SW3", "2"), ("SW4", "2"), ("SW5", "2"),
         ("R3", "2"), ("R4", "2"), ("R8", "2"),
         ("C1", "2"), ("C2", "2"), ("C3", "2"), ("C4", "2"), ("C5", "2"),
         ("C6", "2"), ("C7", "2"), ("C9", "2"), ("C10", "2"), ("C11", "2"),
@@ -175,8 +190,8 @@ NETS = {
 
     # EN and IO0 are no longer brought out to the header: the transistors
     # derive them, and exposing both would let an adapter fight them.
-    "EN": [("U1", "3"), ("R1", "2"), ("C3", "1"), ("SW2", "1"), ("Q1", "3")],
-    "IO0": [("U1", "25"), ("R2", "2"), ("SW3", "1"), ("Q2", "3")],
+    "EN": [("U1", "3"), ("R1", "2"), ("C3", "1"), ("SW4", "1"), ("Q1", "3")],
+    "IO0": [("U1", "25"), ("R2", "2"), ("SW5", "1"), ("Q2", "3")],
     "RXD0": [("U1", "34"), ("J5", "3")],
     "TXD0": [("U1", "35"), ("J5", "4")],
 
@@ -193,7 +208,13 @@ NETS = {
     "I2C_SDA": [("U1", "33"), ("J3", "4")],
     "I2C_SCL": [("U1", "36"), ("J3", "3")],
 
-    "BTN_MODE": [("U1", "9"), ("SW1", "1")],
+    # GPIO 32 / 33 / 27 -- pins 8, 9 and 12 of the module. All three are RTC
+    # pins, but only BT2 is wired as the deep-sleep wake source: ext0 watches a
+    # single pin, and the ESP32's ext1 can only wake on "all low" or "any
+    # high", neither of which means "any of three active-low buttons".
+    "BTN_1": [("U1", "8"), ("SW1", "1")],
+    "BTN_2": [("U1", "9"), ("SW2", "1")],
+    "BTN_3": [("U1", "12"), ("SW3", "1")],
     "VBAT_SENSE": [("U1", "7"), ("R7", "2"), ("R8", "1"), ("C18", "1")],
 
     "DAC_XSMT": [("U2", "17"), ("R9", "2")],
@@ -219,8 +240,8 @@ NO_CONNECT = [
     ("J1", "A6"), ("J1", "A7"), ("J1", "B6"), ("J1", "B7"),
     ("J1", "A8"), ("J1", "B8"),
     # ESP32 pins this design does not use.
-    ("U1", "4"), ("U1", "5"), ("U1", "6"), ("U1", "8"),
-    ("U1", "10"), ("U1", "11"), ("U1", "12"), ("U1", "13"), ("U1", "14"),
+    ("U1", "4"), ("U1", "5"), ("U1", "6"),
+    ("U1", "10"), ("U1", "11"), ("U1", "13"), ("U1", "14"),
     ("U1", "16"), ("U1", "17"), ("U1", "18"), ("U1", "19"), ("U1", "20"),
     ("U1", "21"), ("U1", "22"), ("U1", "27"), ("U1", "28"), ("U1", "29"),
     ("U1", "30"), ("U1", "31"), ("U1", "32"), ("U1", "37"),
@@ -261,7 +282,11 @@ BOARD = {
     # passives to the back would shrink it considerably, but a single-sided
     # assembly is far easier to hand-build, and this is revision A.
     "width_mm": 60.0,
-    "height_mm": 55.0,
+    # 64 rather than 55: the three user buttons need a row of their own along
+    # the bottom, and the old bottom edge was already taken by the OLED and
+    # programming headers. Hand placement would reclaim most of this -- the
+    # extra 9 mm buys a row that is mostly air.
+    "height_mm": 64.0,
     "corner_radius_mm": 6.0,
     "mounting_hole_dia_mm": 2.2,
     "mounting_inset_mm": 4.0,

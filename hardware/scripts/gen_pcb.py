@@ -79,9 +79,16 @@ ANCHORED = {
     "J2": (52.0, 27.0, 90),       # headphone jack, right edge
     "J3": (16.0, 52.0, 90),       # OLED header, bottom edge
     "J5": (34.0, 52.0, 90),       # programming header, bottom edge
-    "SW1": (53.0, 48.5, 0),       # MODE
-    "SW2": (53.0, 41.0, 0),       # RESET
-    "SW3": (44.5, 44.0, 0),       # BOOT
+    # The three user buttons get their own row along the bottom edge, in the
+    # order a thumb expects: previous, play, next. That row is why the board
+    # grew 9 mm taller -- the old bottom edge was already full of headers, and
+    # squeezing five switches into the sides would have put the ones people
+    # press constantly behind the jack.
+    "SW3": (16.0, 59.0, 0),       # BT3, previous / volume down
+    "SW2": (30.0, 59.0, 0),       # BT2, play-pause / pairing
+    "SW1": (44.0, 59.0, 0),       # BT1, next / volume up
+    "SW4": (53.0, 41.0, 0),       # RESET, out of the way
+    "SW5": (53.0, 48.5, 0),       # BOOT, out of the way
     "D1": (8.5, 51.5, 0),         # charge LED, visible at the bottom edge
     "Q1": (25.0, 26.5, 0),        # auto-reset pair, below the module
     "Q2": (29.5, 26.5, 0),
@@ -319,12 +326,20 @@ def build():
     # A bare BOARD() carries defaults that reject perfectly normal footprints:
     # the WROOM module's thermal vias drill 0.2 mm, under the 0.3 mm default
     # minimum. Set rules that match what a cheap two-layer fab actually offers.
+    # JLCPCB's standard two-layer capability, with margin. Their published
+    # floors are 0.127 mm track and space, 0.2 mm drill, 0.13 mm annular ring
+    # and 0.5 mm hole-to-hole; these sit at or inside those, so the board is
+    # buildable on their cheapest process. The same numbers are in the project
+    # file's netclass, which is what DRC actually enforces -- the values here
+    # are the board's own floor.
     settings = board.GetDesignSettings()
     settings.m_MinClearance = mm(0.15)
-    settings.m_TrackMinWidth = mm(0.2)
+    settings.m_TrackMinWidth = mm(0.15)
     settings.m_MinThroughDrill = mm(0.2)
-    settings.m_ViasMinSize = mm(0.45)
-    settings.m_ViasMinAnnularWidth = mm(0.1)
+    settings.m_ViasMinSize = mm(0.5)
+    settings.m_ViasMinAnnularWidth = mm(0.13)
+    settings.m_HoleToHoleMin = mm(0.5)
+    settings.m_CopperEdgeClearance = mm(0.5)
 
     # --- nets ---------------------------------------------------------------
     nets = {}

@@ -23,22 +23,27 @@ STEP_MM = 0.25
 
 TRACK_WIDTH_MM = 0.2
 POWER_WIDTH_MM = 0.4          # VBAT, VBUS and the 3V3 rails carry real current
-# Match KiCad's default netclass clearance, not the board minimum. The
-# minimum is a floor the rules may not go below; the netclass value is what DRC
-# actually enforces, and assuming the floor produced 43 clearance errors on a
+# Must match the netclass clearance in blueaudio-puck.kicad_pro, because that
+# is what DRC enforces -- the board's own minimum is only a floor the rules may
+# not go below. Assuming the floor once produced 43 clearance violations on a
 # board the router believed was clean.
-CLEARANCE_MM = 0.2
+#
+# 0.15 mm is comfortably above JLCPCB's 0.127 mm capability, and the 0.05 mm it
+# frees up per side is most of what lets the congested area route at all.
+CLEARANCE_MM = 0.15
 VIA_DIA_MM = 0.6
 VIA_DRILL_MM = 0.3
 
-# How far copper reaches beyond a track centreline or pad edge before another
-# net may occupy a cell.
-#
-# The half-step is not padding for luck. Tracks sit on cell centres, so two
-# tracks on adjacent cells are one STEP apart -- and one STEP is less than
-# width + clearance. Without this term the router produced forty clearance
-# violations while believing every cell it used was free.
-INFLATE_MM = TRACK_WIDTH_MM / 2.0 + CLEARANCE_MM + STEP_MM / 2.0
+# Copper-to-hole is its own DRC rule and it is stricter than copper-to-copper.
+# The router checks one clearance for everything, so drilled pads are claimed
+# slightly larger than their copper to make the generic check come out right --
+# otherwise a track runs 0.20 mm from a mounting hole that wants 0.25 mm.
+HOLE_CLEARANCE_MM = 0.25
+
+# Quantisation margin. Copper is rasterised onto a grid, so a cell is claimed
+# whenever any of it is covered; half a step of slack keeps the raster
+# conservative rather than optimistic.
+RASTER_MARGIN_MM = STEP_MM / 2.0
 
 VIA_COST = 20                 # in cells; discourages needless layer changes
 # No new via may be placed within this of an existing one or of a hole. Two
@@ -49,6 +54,45 @@ TURN_COST = 2                 # keeps runs straight and legible
 
 FREE = -1
 BLOCKED = -2
+
+
+def _disc(radius_mm):
+    """Cell offsets covering a disc of this radius, for footprint checks."""
+    r = int(radius_mm / STEP_MM + 0.999)
+    out = []
+    for dy in range(-r, r + 1):
+        for dx in range(-r, r + 1):
+            if (dx * dx + dy * dy) * STEP_MM * STEP_MM <= radius_mm * radius_mm + 1e-9:
+                out.append((dx, dy))
+    return out
+
+
+# A track or via is not a point. It is copper of a given width centred on the
+# cell, and it needs clearance beyond that. Checking only the cell the path
+# steps through is what let a 0.4 mm power track sit 0.15 mm from a pad, and
+# let a 0.6 mm via land on top of another net's track -- 29 clearance errors
+# and 8 shorts on a board the router believed was clean.
+_FOOTPRINT = {}
+
+
+def footprint_for(width_mm):
+    """
+    Cells a track of this width needs to itself, clearance included.
+
+    The grid stores *copper only* -- pad bodies and laid track. Clearance lives
+    here, in the check, and nowhere else. An earlier version also grew a
+    clearance halo around every pad and then ran this check on top of it, which
+    demanded clearance twice and made escaping a 0.65 mm pitch TSSOP
+    impossible: sixteen nets failed for a reason that was arithmetic, not
+    congestion.
+    """
+    key = round(width_mm, 3)
+    if key not in _FOOTPRINT:
+        _FOOTPRINT[key] = _disc(width_mm / 2.0 + CLEARANCE_MM + RASTER_MARGIN_MM)
+    return _FOOTPRINT[key]
+
+
+VIA_FOOTPRINT = None      # built lazily; needs VIA_DIA_MM below
 
 POWER_NETS = {"VBAT", "VBUS", "+3V3", "+3V3A"}
 
@@ -124,7 +168,8 @@ class Grid:
                     pass
 
     def claim_segment(self, li, x0, y0, x1, y1, netcode, width_mm):
-        half = width_mm / 2.0 + CLEARANCE_MM + STEP_MM / 2.0
+        """Claim the copper the track occupies. Clearance is the checker's job."""
+        half = width_mm / 2.0 + RASTER_MARGIN_MM
         lo_x, hi_x = sorted((x0, x1))
         lo_y, hi_y = sorted((y0, y1))
         cx0, cy0 = self.to_cell(lo_x - half, lo_y - half)
@@ -156,18 +201,17 @@ def build_grid(board, width_mm, height_mm):
             if pad.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
                 layers = [0, 1]          # a hole obstructs every layer
             net = pad.GetNetCode()
+            # Drilled pads get the difference between hole clearance and
+            # copper clearance added to their footprint.
+            grow = (HOLE_CLEARANCE_MM - CLEARANCE_MM) if pad.HasHole() else 0.0
             pads.append((
-                pcbnew.ToMM(box.GetLeft()), pcbnew.ToMM(box.GetTop()),
-                pcbnew.ToMM(box.GetRight()), pcbnew.ToMM(box.GetBottom()),
+                pcbnew.ToMM(box.GetLeft()) - grow, pcbnew.ToMM(box.GetTop()) - grow,
+                pcbnew.ToMM(box.GetRight()) + grow, pcbnew.ToMM(box.GetBottom()) + grow,
                 layers, net if net > 0 else BLOCKED))
 
-    for x0, y0, x1, y1, layers, code in pads:          # bodies
+    for x0, y0, x1, y1, layers, code in pads:          # copper only
         for li in layers:
             grid.claim_box(li, x0, y0, x1, y1, code, grow=0.0, bodies=True)
-    for x0, y0, x1, y1, layers, code in pads:          # clearance halo
-        for li in layers:
-            grid.claim_box(li, x0, y0, x1, y1, code, grow=INFLATE_MM)
-
     # Vias may not be dropped on top of, or hard against, a drilled pad.
     for fp in board.GetFootprints():
         for pad in fp.Pads():
@@ -183,16 +227,35 @@ def _neighbours(grid, li, cx, cy):
         nx_, ny_ = cx + dx, cy + dy
         if grid.inside(nx_, ny_):
             yield li, nx_, ny_, (dx, dy), 1
-    if (cx, cy) not in grid.via_block:
-        yield 1 - li, cx, cy, None, VIA_COST  # change layer in place
+    yield 1 - li, cx, cy, None, VIA_COST      # change layer in place
 
 
-def _passable(grid, li, cx, cy, netcode):
-    v = grid.get(li, cx, cy)
-    return v == FREE or v == netcode
+def _passable(grid, li, cx, cy, netcode, offsets):
+    """Every cell the copper would cover must be free, or already ours."""
+    for dx, dy in offsets:
+        x, y = cx + dx, cy + dy
+        if not grid.inside(x, y):
+            return False
+        v = grid.get(li, x, y)
+        if v != FREE and v != netcode:
+            return False
+    return True
 
 
-def route_net(grid, netcode, targets):
+def _via_placeable(grid, cx, cy, netcode):
+    """A via pierces both layers, so both must be clear of other nets."""
+    global VIA_FOOTPRINT
+    if VIA_FOOTPRINT is None:
+        VIA_FOOTPRINT = _disc(VIA_DIA_MM / 2.0 + CLEARANCE_MM + RASTER_MARGIN_MM)
+    if (cx, cy) in grid.via_block:
+        return False
+    for li in (0, 1):
+        if not _passable(grid, li, cx, cy, netcode, VIA_FOOTPRINT):
+            return False
+    return True
+
+
+def route_net(grid, netcode, targets, width_mm=TRACK_WIDTH_MM):
     """
     Connect every pad of one net.
 
@@ -204,6 +267,7 @@ def route_net(grid, netcode, targets):
     connected = {targets[0]}
     remaining = list(targets[1:])
     paths = []
+    offsets = footprint_for(width_mm)
 
     while remaining:
         # Multi-source A*: start from everything already joined up.
@@ -227,7 +291,11 @@ def route_net(grid, netcode, targets):
             li, cx, cy = node
             for nli, nxc, nyc, ndir, step in _neighbours(grid, li, cx, cy):
                 nxt = (nli, nxc, nyc)
-                if not _passable(grid, nli, nxc, nyc, netcode):
+                if ndir is None:
+                    # A layer change: check the whole via, on both layers.
+                    if not _via_placeable(grid, cx, cy, netcode):
+                        continue
+                elif not _passable(grid, nli, nxc, nyc, netcode, offsets):
                     continue
                 extra = TURN_COST if (ndir and came_dir and ndir != came_dir) else 0
                 ncost = cost + step + extra
@@ -290,7 +358,7 @@ def path_to_tracks(board, path, netcode, width_mm, grid):
             made.append(via)
             for li in (0, 1):
                 grid.claim_box(li, x, y, x, y, netcode,
-                               grow=VIA_DIA_MM / 2.0 + CLEARANCE_MM + STEP_MM / 2.0)
+                               grow=VIA_DIA_MM / 2.0 + RASTER_MARGIN_MM)
             grid.block_vias_near(x, y)
             run = [node]
             continue
@@ -333,21 +401,28 @@ def route_board(board, width_mm, height_mm, skip_nets=("GND",)):
             for li in pad_layers(pad):
                 by_net.setdefault((code, name), []).append((li, cx, cy))
 
-    # Short nets first: they have the fewest choices, so letting them go last
-    # is how a router paints itself into a corner.
-    def span(item):
-        pads = item[1]
+    # Power rails first, then short nets.
+    #
+    # Sorting purely by length put the power nets last, because they span the
+    # whole board -- and by the time their turn came, the space they needed was
+    # full of signal traces. They are also the widest, so they need the most
+    # room and have the fewest places to put it. Wide-and-constrained goes
+    # first; among the rest, short before long, because short nets have the
+    # fewest choices and letting them go last is how a router corners itself.
+    def order(item):
+        (_code, name), pads = item
         xs = [p[1] for p in pads]
         ys = [p[2] for p in pads]
-        return (max(xs) - min(xs)) + (max(ys) - min(ys))
+        span = (max(xs) - min(xs)) + (max(ys) - min(ys))
+        return (0 if name in POWER_NETS else 1, span)
 
     routed, failed = [], []
-    for (code, name), pads in sorted(by_net.items(), key=span):
+    for (code, name), pads in sorted(by_net.items(), key=order):
         uniq = sorted(set(pads))
         if len(uniq) < 2:
             continue
         width = POWER_WIDTH_MM if name in POWER_NETS else TRACK_WIDTH_MM
-        paths = route_net(grid, code, uniq)
+        paths = route_net(grid, code, uniq, width)
         if paths is None:
             failed.append(name)
             continue
