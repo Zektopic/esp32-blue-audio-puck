@@ -39,9 +39,20 @@ on a breadboard. That is what makes it a puck rather than a project box.
 | GPIO 2 | I²S DATA | PCM5102A `DIN` |
 | GPIO 21 | I²C SDA | SSD1306 `SDA` |
 | GPIO 22 | I²C SCL | SSD1306 `SCL` |
-| GPIO 33 | Button | to GND |
+| GPIO 32 | BT1 button | to GND |
+| GPIO 33 | BT2 button | to GND |
+| GPIO 27 | BT3 button | to GND |
 | GPIO 35 | Battery sense | divider midpoint (optional) |
 | 3V3, GND | Power | both boards |
+
+All three buttons wire straight between their pin and ground — the internal
+pull-ups do the rest, so no external resistors. All three are RTC-capable pins,
+though only BT2 is wired as the deep-sleep wake source: `ext0` watches exactly
+one pin, and the ESP32's `ext1` can only wake on *all low* or *any high*,
+neither of which means "any of three active-low buttons pressed".
+
+Avoid GPIO 34–39 for buttons. They are input-only **and** have no internal
+pull-up, so a switch on one of them floats until you fit your own resistor.
 
 Three things about these pins are worth knowing before you solder.
 
@@ -192,8 +203,12 @@ Estimated runtime through an ~88% converter (≈148 mA from a 3.7 V nominal cell
    any firmware cleverness.
 2. **Buck-boost instead of an LDO.** ~20–25%.
 3. **160 MHz instead of 240.** ~15%. Already the default here.
-4. **Lower Bluetooth TX power.** Already capped at 0 dBm
-   (`PUCK_BT_TX_POWER_LEVEL`); worth several mA.
+4. **Lower Bluetooth TX power.** Worth several mA, and the one lever here with
+   a real cost: the default is now the +9 dBm maximum
+   (`PUCK_BT_TX_POWER_LEVEL`). Capping it at 0 dBm saves current and throws
+   away most of the link budget -- a puck in a pocket has a body between it and
+   the phone, and 9 dB is nearly three times the free-space range. Reach for
+   the cell size first.
 5. **Deep sleep on disconnect.** Extends playback by nothing, but it is the
    difference between flat by morning and fine next week. Already implemented.
 6. **Power-gate the headphone amp** using the 3.5 mm jack's switched contact and

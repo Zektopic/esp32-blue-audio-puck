@@ -204,6 +204,38 @@ claiming to control it.
 **Deep sleep buys nothing during playback.** It is the difference between flat
 by morning and fine next week.
 
+## Three buttons beat one button with a timing test
+
+The first scheme put everything on a single button: one tap for play/pause, two
+for next, three for previous, and holds for pairing. It worked, and it was
+unpleasant. Every track skip was a timing test, the multi-tap window added a
+third of a second of latency to the most common action, and one bounced contact
+turned play/pause into a track change.
+
+Three buttons make each press unambiguous. Tap does one thing, hold does one
+thing, and nothing depends on how fast the user's thumb is:
+
+| Button | Tap | Hold | Extra |
+| --- | --- | --- | --- |
+| BT1 | next | volume up, repeating | — |
+| BT2 | play/pause | pairing (1.5 s) | forget bonds (5 s) |
+| BT3 | previous | volume down, repeating | — |
+
+Two details are worth keeping if this is ever rewritten:
+
+**Hold thresholds are per button, not global.** A volume button wants a short
+threshold (500 ms) and a brisk repeat, because the user is watching a number
+move and expects it to start moving. Pairing wants a long one (1.5 s) and no
+repeat, because triggering it by accident is annoying and there is nothing on
+screen to warn you. A single shared threshold has to be wrong for one of them.
+
+**A hold suppresses the tap.** The tap fires on release and only if no hold
+already fired, so holding for volume does not also skip a track when you let go.
+
+The component reports `(button, event)` and knows nothing about tracks or
+volume; the mapping lives in `puck_main.c`. That is the same separation the rest
+of the firmware keeps -- `puck_ui` has never known what AVRCP is.
+
 ## The display runs at two rates
 
 Track text and battery are read at **2 Hz**; the marquee animates at **8 Hz**

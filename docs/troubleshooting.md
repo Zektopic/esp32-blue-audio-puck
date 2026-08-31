@@ -62,11 +62,11 @@ cannot see it. The boot log tells you which state it is in:
 I (1663) puck: 1 bonded source(s); hold the button to pair another
 ```
 
-**Hold the button for 1.5 seconds** to open a 120-second pairing window. The LED
-blinks fast while it is open.
+**Hold BT2 for 1.5 seconds** to open a 120-second pairing window. The LED blinks
+fast while it is open, and the screen shows `PAIRING`.
 
-To start completely fresh, **hold for 5 seconds** — that forgets every bonded
-source and reopens pairing.
+To start completely fresh, **hold BT2 for 5 seconds** — that forgets every
+bonded source and reopens pairing.
 
 If it is genuinely never discoverable:
 
@@ -94,6 +94,9 @@ If it sleeps and wakes immediately, the wake pin is floating. `ext0` wakes on a
 level and the button pulls its pin low, so the RTC pull-up must be enabled — the
 firmware does this, but only for RTC-capable pins. GPIO 34–39 are input-only and
 GPIO 33 is the tested default.
+
+Note only **BT2** wakes the puck. `ext0` watches a single pin, so BT1 and BT3
+do nothing while it is asleep — that is by design, not a fault.
 
 ## Build failures
 
@@ -146,6 +149,31 @@ its own file so a fix is a one-line edit.
 scan direction (`0xC8`) in `ssd1306_init` set the orientation. Some modules are
 built the other way round; swap them for `0xA0` and `0xC0`.
 
+## A button does nothing, or does the wrong thing
+
+The boot log lists every button it configured:
+
+```
+I (611) puck_ui: BT1 button on GPIO 32
+I (611) puck_ui: BT2 button on GPIO 33
+I (621) puck_ui: BT3 button on GPIO 27
+```
+
+**"BT3 button not fitted"** — that pin is set to `-1` in `menuconfig`.
+
+**Nothing at all happens** — the firmware logs every press at info level
+(`BT1 tap`, `BT2 hold`). If pressing produces no line, the switch is not
+reaching the pin, or it is wired to 3V3 instead of GND. These are active low
+with internal pull-ups: the switch belongs between the pin and **ground**.
+
+**A tap registers as a hold** — the contact is staying closed, or the pin is
+shorted low. Check the log timestamps: a tap and its release should be tens of
+milliseconds apart.
+
+**A hold never repeats** — only BT1 and BT3 repeat. BT2 fires once at 1.5 s and
+again at 5 s, deliberately: nobody wants pairing mode to retrigger while their
+thumb rests on the button.
+
 ## The signal bars are always full
 
 **That is almost certainly correct.** Bluetooth Classic reports RSSI as a delta
@@ -165,8 +193,24 @@ sets how often it asks.
 
 ## The battery reading looks wrong
 
-**It says `USB`** — `PUCK_BATTERY_ADC_GPIO` is `-1`, the default. That is the
-"not fitted" report, not a failure.
+**It says `USB` but a cell is connected** — `PUCK_BATTERY_ADC_GPIO` is `-1`, so
+the firmware never looks at the pin. The boot log says so plainly:
+
+```
+I (...) puck_batt: no battery sense fitted; assuming USB power
+```
+
+Set it to the divider pin (35 on the reference board). A working divider reads
+about half the cell voltage: measure the midpoint with a meter and expect
+~1.9 V for a cell around 3.8 V.
+
+**It says `USB` and nothing is connected** — correct. That is the "not fitted"
+report, not a failure.
+
+**`implausible cell voltage ... check the divider resistors`** — the reading is
+outside 2.5–4.6 V, so it is not a battery. Either the divider ratio does not
+match the resistors actually fitted, or the ADC pin has nothing on it and is
+reading noise.
 
 **The percentage is nonsense** — check `PUCK_BATTERY_DIVIDER_RATIO_X100` against
 the resistors you actually fitted. Two equal resistors are `200`. A wrong ratio

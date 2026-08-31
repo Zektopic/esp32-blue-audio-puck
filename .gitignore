@@ -77,8 +77,8 @@ Desktop.ini
 *.suo       # Visual Studio Solution User Options
 *.sln.docstates # Visual Studio
 
-# KiCad
-*-backups/
+# KiCad local state (per-user, never shared)
 *.kicad_prl
+*-backups/
 fp-info-cache
 hardware/build/

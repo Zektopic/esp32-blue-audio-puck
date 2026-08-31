@@ -2,8 +2,11 @@
  * SPDX-FileCopyrightText: 2026 Zektopic
  * SPDX-License-Identifier: MIT
  *
- * Physical interface: one multi-function button, two optional volume buttons,
- * and a status LED.
+ * Physical interface: three front-panel buttons and a status LED.
+ *
+ * Each button is an independent state machine reporting taps, holds and
+ * repeats. What any of that *means* lives in the application -- this file has
+ * no idea what a track is.
  *
  * The UI task sleeps indefinitely when nothing is happening and is woken by a
  * GPIO interrupt, rather than polling on a timer. On a device that will later
@@ -25,12 +28,8 @@
 
 static const char *TAG = "puck_ui";
 
-#define POLL_INTERVAL_MS     20    /* while a button is down or a gesture is open */
+#define POLL_INTERVAL_MS     20    /* only while a button is down or the LED animates */
 #define DEBOUNCE_MS          30
-#define LONG_PRESS_MS        1500
-#define VERY_LONG_PRESS_MS   5000
-#define MULTI_CLICK_GAP_MS   350   /* window to wait for another click */
-#define VOLUME_REPEAT_MS     220   /* auto-repeat while a volume button is held */
 
 #define LED_TIMER            LEDC_TIMER_0
 #define LED_CHANNEL          LEDC_CHANNEL_0
@@ -41,18 +40,47 @@ static const char *TAG = "puck_ui";
 #define UI_TASK_STACK        3072
 #define UI_TASK_PRIO         4
 
+/**
+ * Timing, per button.
+ *
+ * Deliberately not uniform. A button that steps the volume wants a short hold
+ * threshold and a brisk repeat, because the user is watching a number move. A
+ * button that opens pairing wants a long one, because doing it by accident is
+ * annoying and there is nothing to watch. One shared threshold would have to
+ * be wrong for one of them.
+ *
+ * hold_ms 0 disables holding entirely; repeat_ms 0 means fire once and stop;
+ * extra_ms 0 means there is no second tier.
+ */
 typedef struct {
-    TaskHandle_t         task;
-    puck_ui_gesture_cb_t gesture_cb;
+    int         gpio;
+    uint32_t    hold_ms;
+    uint32_t    repeat_ms;
+    uint32_t    extra_ms;
+    const char *name;
+} button_cfg_t;
+
+static const button_cfg_t s_cfg[PUCK_UI_BUTTON_COUNT] = {
+    {CONFIG_PUCK_BT1_GPIO,  500, 180,    0, "BT1"},
+    {CONFIG_PUCK_BT2_GPIO, 1500,   0, 5000, "BT2"},
+    {CONFIG_PUCK_BT3_GPIO,  500, 180,    0, "BT3"},
+};
+
+typedef struct {
+    bool    down;
+    int64_t down_at_us;
+    int64_t last_release_us;
+    int64_t next_repeat_us;
+    bool    hold_fired;   /*!< hold already reported for this press */
+    bool    extra_fired;  /*!< extra-long already reported for this press */
+} button_state_t;
+
+typedef struct {
+    TaskHandle_t        task;
+    puck_ui_button_cb_t button_cb;
     volatile puck_ui_state_t state;
 
-    /* main button */
-    bool     down;
-    int64_t  down_at_us;
-    int64_t  last_release_us;
-    uint8_t  click_count;
-    bool     long_fired;      /*!< long press already reported for this hold */
-    bool     very_long_fired; /*!< very long press already reported for this hold */
+    button_state_t buttons[PUCK_UI_BUTTON_COUNT];
 
     /* LED animation phase, advanced once per poll tick */
     uint16_t led_phase;
@@ -76,11 +104,28 @@ static void IRAM_ATTR button_isr(void *arg)
     portYIELD_FROM_ISR(higher_priority_task_woken);
 }
 
-static void emit(puck_ui_gesture_t gesture)
+static const char *event_name(puck_ui_event_t event)
 {
-    ESP_LOGI(TAG, "gesture %d", gesture);
-    if (s_ui.gesture_cb) {
-        s_ui.gesture_cb(gesture);
+    switch (event) {
+    case PUCK_UI_TAP:         return "tap";
+    case PUCK_UI_HOLD:        return "hold";
+    case PUCK_UI_HOLD_REPEAT: return "hold-repeat";
+    case PUCK_UI_HOLD_EXTRA:  return "hold-extra";
+    default:                  return "?";
+    }
+}
+
+static void emit(puck_ui_button_t button, puck_ui_event_t event)
+{
+    /* Repeats are debug-level: at 180 ms they would otherwise flood the log
+     * for as long as someone holds the volume down. */
+    if (event == PUCK_UI_HOLD_REPEAT) {
+        ESP_LOGD(TAG, "%s %s", s_cfg[button].name, event_name(event));
+    } else {
+        ESP_LOGI(TAG, "%s %s", s_cfg[button].name, event_name(event));
+    }
+    if (s_ui.button_cb) {
+        s_ui.button_cb(button, event);
     }
 }
 
@@ -141,114 +186,74 @@ static bool led_tick(void)
     }
 }
 
-/** Resolve an accumulated click count into a gesture. */
-static void flush_clicks(void)
-{
-    switch (s_ui.click_count) {
-    case 0:
-        break;
-    case 1:
-        emit(PUCK_UI_PRESS_SINGLE);
-        break;
-    case 2:
-        emit(PUCK_UI_PRESS_DOUBLE);
-        break;
-    default:
-        emit(PUCK_UI_PRESS_TRIPLE);
-        break;
-    }
-    s_ui.click_count = 0;
-}
-
 /**
- * Service the main button.
+ * Advance one button.
  *
- * @return true while a gesture is still in progress, so the caller keeps
- *         polling instead of sleeping.
+ * @return true while this button is still down, so the caller keeps polling
+ *         instead of going back to sleep.
  */
-static bool service_main_button(int64_t now_us)
+static bool service_button(puck_ui_button_t index, int64_t now_us)
 {
-    const bool pressed = button_pressed(CONFIG_PUCK_BUTTON_GPIO);
+    const button_cfg_t *cfg = &s_cfg[index];
+    button_state_t *st = &s_ui.buttons[index];
 
-    if (pressed && !s_ui.down) {
-        /* Ignore a re-assert inside the debounce window: contact bounce would
-         * otherwise register as a double click. */
-        if (now_us - s_ui.last_release_us < DEBOUNCE_MS * 1000) {
+    if (cfg->gpio < 0) {
+        return false;
+    }
+
+    const bool pressed = button_pressed(cfg->gpio);
+
+    if (pressed && !st->down) {
+        /* Ignore a re-assert inside the debounce window: contact bounce on
+         * release would otherwise read as a fresh press. */
+        if (now_us - st->last_release_us < DEBOUNCE_MS * 1000) {
             return true;
         }
-        s_ui.down = true;
-        s_ui.down_at_us = now_us;
-        s_ui.long_fired = false;
-        s_ui.very_long_fired = false;
+        st->down = true;
+        st->down_at_us = now_us;
+        st->hold_fired = false;
+        st->extra_fired = false;
+        st->next_repeat_us = 0;
         return true;
     }
 
-    if (pressed && s_ui.down) {
-        const int64_t held_us = now_us - s_ui.down_at_us;
+    if (pressed && st->down) {
+        const int64_t held_us = now_us - st->down_at_us;
 
-        if (!s_ui.long_fired && held_us >= LONG_PRESS_MS * 1000) {
-            /* Fire on reaching the threshold, not on release: the user gets
-               feedback while still holding, which is what makes it feel like a
-               long press rather than a slow click. */
-            s_ui.long_fired = true;
-            s_ui.click_count = 0;
-            emit(PUCK_UI_PRESS_LONG);
+        if (cfg->hold_ms && !st->hold_fired &&
+            held_us >= (int64_t)cfg->hold_ms * 1000) {
+            /* Fire on crossing the threshold, not on release: the user gets
+             * feedback while still holding, which is what makes a hold feel
+             * like a hold rather than a slow tap. */
+            st->hold_fired = true;
+            st->next_repeat_us = now_us + (int64_t)cfg->repeat_ms * 1000;
+            emit(index, PUCK_UI_HOLD);
+        } else if (st->hold_fired && cfg->repeat_ms &&
+                   now_us >= st->next_repeat_us) {
+            st->next_repeat_us = now_us + (int64_t)cfg->repeat_ms * 1000;
+            emit(index, PUCK_UI_HOLD_REPEAT);
         }
-        if (!s_ui.very_long_fired && held_us >= VERY_LONG_PRESS_MS * 1000) {
-            s_ui.very_long_fired = true;
-            emit(PUCK_UI_PRESS_VERY_LONG);
+
+        if (cfg->extra_ms && !st->extra_fired &&
+            held_us >= (int64_t)cfg->extra_ms * 1000) {
+            st->extra_fired = true;
+            emit(index, PUCK_UI_HOLD_EXTRA);
         }
         return true;
     }
 
-    if (!pressed && s_ui.down) {
-        s_ui.down = false;
-        s_ui.last_release_us = now_us;
-        if (!s_ui.long_fired && (now_us - s_ui.down_at_us) >= DEBOUNCE_MS * 1000) {
-            s_ui.click_count++;
+    if (!pressed && st->down) {
+        st->down = false;
+        st->last_release_us = now_us;
+        /* A tap only counts if nothing longer already fired, and if the press
+         * outlasted the debounce window. */
+        if (!st->hold_fired && (now_us - st->down_at_us) >= DEBOUNCE_MS * 1000) {
+            emit(index, PUCK_UI_TAP);
         }
-        return true;
+        return false;
     }
 
-    /* Released and settled: wait out the multi-click window, then resolve. */
-    if (s_ui.click_count > 0) {
-        if (now_us - s_ui.last_release_us >= MULTI_CLICK_GAP_MS * 1000) {
-            flush_clicks();
-            return false;
-        }
-        return true;
-    }
     return false;
-}
-
-/**
- * Service the optional volume buttons, which auto-repeat while held.
- *
- * @return true while either is held.
- */
-static bool service_volume_buttons(int64_t now_us)
-{
-    static int64_t next_repeat_us;
-    bool active = false;
-
-    if (button_pressed(CONFIG_PUCK_VOLUME_UP_GPIO)) {
-        active = true;
-        if (now_us >= next_repeat_us) {
-            emit(PUCK_UI_VOLUME_UP);
-            next_repeat_us = now_us + VOLUME_REPEAT_MS * 1000;
-        }
-    } else if (button_pressed(CONFIG_PUCK_VOLUME_DOWN_GPIO)) {
-        active = true;
-        if (now_us >= next_repeat_us) {
-            emit(PUCK_UI_VOLUME_DOWN);
-            next_repeat_us = now_us + VOLUME_REPEAT_MS * 1000;
-        }
-    } else {
-        /* Reset so the next press acts immediately rather than waiting out a
-         * repeat interval left over from the last one. */
-        next_repeat_us = 0;
-    }
-    return active;
 }
 
 static void ui_task(void *arg)
@@ -258,11 +263,15 @@ static void ui_task(void *arg)
     for (;;) {
         const int64_t now_us = esp_timer_get_time();
 
-        const bool button_busy = service_main_button(now_us);
-        const bool volume_busy = service_volume_buttons(now_us);
+        bool button_busy = false;
+        for (int i = 0; i < PUCK_UI_BUTTON_COUNT; i++) {
+            /* Not short-circuited: every button has to be serviced on every
+             * tick, or holding one would freeze the others. */
+            button_busy |= service_button((puck_ui_button_t)i, now_us);
+        }
         const bool led_busy = led_tick();
 
-        if (button_busy || volume_busy || led_busy) {
+        if (button_busy || led_busy) {
             /* Something is in flight: keep a slow poll going. Clear any
              * notification that arrived meanwhile so it does not cause an
              * immediate spurious wake on the next idle sleep. */
@@ -345,9 +354,10 @@ esp_err_t puck_ui_init(void)
                         ESP_ERR_NO_MEM, TAG, "UI task create failed");
 
     /* Buttons last: the ISR notifies s_ui.task, which must already exist. */
-    ESP_RETURN_ON_ERROR(configure_button(CONFIG_PUCK_BUTTON_GPIO, "main"), TAG, "button setup");
-    ESP_RETURN_ON_ERROR(configure_button(CONFIG_PUCK_VOLUME_UP_GPIO, "volume up"), TAG, "button setup");
-    ESP_RETURN_ON_ERROR(configure_button(CONFIG_PUCK_VOLUME_DOWN_GPIO, "volume down"), TAG, "button setup");
+    for (int i = 0; i < PUCK_UI_BUTTON_COUNT; i++) {
+        ESP_RETURN_ON_ERROR(configure_button(s_cfg[i].gpio, s_cfg[i].name), TAG,
+                            "button setup");
+    }
 
     return ESP_OK;
 }
@@ -370,7 +380,7 @@ puck_ui_state_t puck_ui_get_state(void)
     return s_ui.state;
 }
 
-void puck_ui_set_gesture_cb(puck_ui_gesture_cb_t cb)
+void puck_ui_set_button_cb(puck_ui_button_cb_t cb)
 {
-    s_ui.gesture_cb = cb;
+    s_ui.button_cb = cb;
 }
