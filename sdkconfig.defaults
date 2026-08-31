@@ -44,3 +44,13 @@ CONFIG_BTDM_CTRL_LPCLK_SEL_MAIN_XTAL=y
 # `CONFIG_EXAMPLE_SSP_ENABLED` seen in the IDF examples is example-local, not a
 # stack option. SSP is selected at runtime through
 # `esp_bluedroid_config_t.ssp_en`, which bt_core sets explicitly.
+
+# --- Battery -----------------------------------------------------------------
+# The reference board fits a 2:1 divider from the cell to GPIO 35, so tell the
+# firmware it is there. Without this the component reports PUCK_BATTERY_ABSENT
+# and the screen shows "USB" no matter what is wired -- which is correct
+# behaviour for a board with no divider, and baffling on a board that has one.
+#
+# Set this back to -1 for a build with no divider: an ADC on a floating pin
+# reads noise, and a confident wrong percentage is worse than an honest "USB".
+CONFIG_PUCK_BATTERY_ADC_GPIO=35

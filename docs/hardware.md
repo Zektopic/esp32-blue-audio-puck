@@ -192,8 +192,12 @@ Estimated runtime through an ~88% converter (≈148 mA from a 3.7 V nominal cell
    any firmware cleverness.
 2. **Buck-boost instead of an LDO.** ~20–25%.
 3. **160 MHz instead of 240.** ~15%. Already the default here.
-4. **Lower Bluetooth TX power.** Already capped at 0 dBm
-   (`PUCK_BT_TX_POWER_LEVEL`); worth several mA.
+4. **Lower Bluetooth TX power.** Worth several mA, and the one lever here with
+   a real cost: the default is now the +9 dBm maximum
+   (`PUCK_BT_TX_POWER_LEVEL`). Capping it at 0 dBm saves current and throws
+   away most of the link budget -- a puck in a pocket has a body between it and
+   the phone, and 9 dB is nearly three times the free-space range. Reach for
+   the cell size first.
 5. **Deep sleep on disconnect.** Extends playback by nothing, but it is the
    difference between flat by morning and fine next week. Already implemented.
 6. **Power-gate the headphone amp** using the 3.5 mm jack's switched contact and

@@ -165,8 +165,24 @@ sets how often it asks.
 
 ## The battery reading looks wrong
 
-**It says `USB`** — `PUCK_BATTERY_ADC_GPIO` is `-1`, the default. That is the
-"not fitted" report, not a failure.
+**It says `USB` but a cell is connected** — `PUCK_BATTERY_ADC_GPIO` is `-1`, so
+the firmware never looks at the pin. The boot log says so plainly:
+
+```
+I (...) puck_batt: no battery sense fitted; assuming USB power
+```
+
+Set it to the divider pin (35 on the reference board). A working divider reads
+about half the cell voltage: measure the midpoint with a meter and expect
+~1.9 V for a cell around 3.8 V.
+
+**It says `USB` and nothing is connected** — correct. That is the "not fitted"
+report, not a failure.
+
+**`implausible cell voltage ... check the divider resistors`** — the reading is
+outside 2.5–4.6 V, so it is not a battery. Either the divider ratio does not
+match the resistors actually fitted, or the ADC pin has nothing on it and is
+reading noise.
 
 **The percentage is nonsense** — check `PUCK_BATTERY_DIVIDER_RATIO_X100` against
 the resistors you actually fitted. Two equal resistors are `200`. A wrong ratio
