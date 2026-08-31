@@ -1,8 +1,8 @@
 # BlueAudio Puck carrier board, rev A
 
 KiCad 10 schematic and PCB for a single-board version of the puck: ESP32-WROOM-32U,
-PCM5102A DAC, Li-po charging, two separate 3V3 rails, OLED header, and a 3.5 mm
-output — 60 × 55 mm.
+PCM5102A DAC, Li-po charging, two separate 3V3 rails, OLED header, three user
+buttons and a 3.5 mm output — 60 × 64 mm, drawn to JLCPCB's two-layer rules.
 
 | File | What it is |
 | --- | --- |
@@ -16,16 +16,18 @@ output — 60 × 55 mm.
 ## Read this before you order anything
 
 > [!CAUTION]
-> **This board is not finished, and it is not fabricable as it stands.**
+> **Not finished: eight nets still need routing by hand.**
 >
-> It is *mostly* routed — 228 track segments, 72 vias, ground pours on both
-> layers — but DRC reports **23 electrical errors** (18 clearance, 4 hole
-> clearance, 1 short) and **two nets that failed to route at all: `RTS` and
-> `VBUS`**.
+> Everything the generator lays is DRC-clean — **zero clearance violations,
+> zero shorts, zero hole-clearance errors** under JLCPCB's rules. But 25 of 33
+> nets are routed, not 33, and the remaining eight are unconnected copper:
 >
-> This is exactly the state this file used to warn against: a half-routed board
-> looks finished. It is written down here in numbers so nobody mistakes it for
-> done. Do not send these files to a fab.
+> `+3V3A` · `AUDIO_L` · `CC1` · `CC2` · `DAC_LDOO` · `DAC_VNEG` · `I2S_BCK` · `I2S_LRCK`
+>
+> All eight are around the two fine-pitch parts — the TSSOP-20 DAC and the
+> USB-C receptacle. Open the board in Pcbnew and its interactive router will
+> finish them far faster and better than the one in `scripts/`. Do not order
+> anything until DRC reports zero unconnected items.
 
 > [!WARNING]
 > **Nothing here has been fabricated or tested.** It passes ERC and the DRC
@@ -38,31 +40,44 @@ Actually run, with the output quoted rather than summarised:
 
 ```
 $ kicad-cli sch erc --severity-error --severity-warning
-Found 2 violations                    # both lib_symbol_mismatch, see below
+Found 4 violations                    # all lib_symbol_mismatch, see below
 
 $ kicad-cli pcb drc --severity-error --severity-warning
-Found 49 violations
-Found 10 unconnected items
+Found 25 violations
+Found 22 unconnected items
 ```
 
 The schematic is clean: **zero electrical errors**, no unconnected pins, no
-dangling labels, no malformed outline.
+dangling labels, no malformed outline. All four ERC warnings are
+`lib_symbol_mismatch` on KiCad's *derived* symbols — the two regulators and the
+two transistors. Cosmetic; see below.
 
-The board is not. Breaking the 49 down:
+The board has **no electrical errors either**. Breaking the 25 down:
 
 | Count | Kind | Status |
 | --- | --- | --- |
-| 18 | `clearance` | **Must fix** — copper too close |
-| 4 | `hole_clearance` | **Must fix** — a drill too near copper |
-| 1 | `shorting_items` | **Must fix** — two nets touching |
-| 10 | `unconnected_items` | **Must fix** — `RTS` and `VBUS` never routed |
+| 22 | `unconnected_items` | **Must fix** — the eight unrouted nets |
 | 15 | `silk_over_copper` | Cosmetic; every fab ignores it |
-| 11 | `silk_overlap` | Cosmetic |
+| 10 | `silk_overlap` | Cosmetic |
 
-The router in `scripts/route.py` gets 29 of 31 nets down. `RTS` and `VBUS` both
-run into congestion it cannot back out of — it routes nets in order and never
-rips up an earlier one to make room, which is the difference between this and a
-real autorouter.
+No `clearance`, no `shorting_items`, no `hole_clearance`. That took three fixes
+to the router's geometry, each of which had produced copper that looked right
+and was not — they are written up in the file that makes them:
+
+- **A track is not a point.** A 0.4 mm power track centred on a 0.25 mm grid
+  cell spills into its neighbours; checking only the cell it steps through let
+  it sit 0.15 mm from a pad. Same for vias, which are 0.6 mm across — one
+  landed on top of another net's track.
+- **Clearance belongs in the check, not the map.** Growing a clearance halo
+  around every pad *and* checking a track's own clearance against it demanded
+  the gap twice, which makes escaping a 0.65 mm pitch TSSOP impossible.
+- **Holes are stricter than copper.** Copper-to-hole is 0.25 mm where
+  copper-to-copper is 0.15 mm, so drilled pads are claimed slightly larger than
+  their copper.
+
+The router still gets 25 of 33 nets rather than all of them. It routes in order
+and never rips up an earlier net to make room, which is the difference between
+it and a real autorouter.
 
 The two ERC warnings are `lib_symbol_mismatch` on `AP2112K-3.3` and
 `LP2985-3.3`. Both are KiCad *derived* symbols (`extends`), and the generator
@@ -135,6 +150,16 @@ the jumper and the board flashes normally.
 **Battery sense** is R7/R8, a 2:1 divider into GPIO 35, matching
 `PUCK_BATTERY_DIVIDER_RATIO_X100=200`.
 
+**Three user buttons** on GPIO 32/33/27, matching the firmware — SW1 is BT1
+(next / volume up), SW2 is BT2 (play-pause / pairing), SW3 is BT3 (previous /
+volume down). All active low straight to ground; the ESP32's internal pull-ups
+mean no external resistors. SW4 and SW5 are RESET and BOOT.
+
+Note there is **no LED on GPIO 27** on this board. The Kconfig help for
+`PUCK_LED_GPIO` suggests 27 for an external status LED, which would collide
+with BT3 on a breadboard. Here the only LED is D1, the charge indicator on
+`CHG_STAT`, so GPIO 27 is unambiguously BT3.
+
 ### Where it departs from `docs/hardware.md`
 
 Both departures are deliberate and both are rev B work:
@@ -148,24 +173,41 @@ avoid. Rev A uses LDOs and pays the efficiency.
 headphones but quiet, exactly as the docs warn. A TPA6132A2 is the rev B
 addition, and it is QFN-16 — it would make this board far harder to hand-build.
 
+## Manufacturing rules
+
+Written into the project file, so DRC enforces them rather than leaving them as
+folklore. JLCPCB's standard two-layer process, with margin:
+
+| | JLC minimum | Used here |
+| --- | --- | --- |
+| Track width | 0.127 mm | 0.20 mm |
+| Clearance | 0.127 mm | 0.15 mm |
+| Via drill | 0.20 mm | 0.30 mm |
+| Via diameter | drill + 0.26 | 0.60 mm |
+| Annular ring | 0.13 mm | 0.15 mm |
+| Hole to hole | 0.50 mm | 0.50 mm |
+| Track to outline | 0.20 mm | 0.50 mm |
+
+Only clearance sits near a limit, and it is still 18% above JLC's floor. The
+0.05 mm it frees up per side compared with KiCad's 0.2 mm default is most of
+what lets the congested area route at all.
+
+**Teardrops are configured but not generated.** The parameters are in the
+project file; KiCad adds the actual teardrops on demand. Run *Edit → Teardrops
+→ Add Teardrops* in Pcbnew once routing is finished — doing it before then
+would only have to be redone.
+
 ## What is left to do
 
-1. **Fix the 23 electrical errors and route `RTS` and `VBUS`.** Either by hand
-   in Pcbnew, or by giving `scripts/route.py` the ability to rip up and retry.
-   Opening the board and routing two nets by hand is the shorter path.
-2. **Apply JLCPCB's constraints.** Their standard two-layer process does
-   0.127 mm track and space, 0.2 mm minimum drill, 0.5 mm hole-to-hole, and
-   0.2 mm trace-to-outline. The board is currently drawn to KiCad's defaults
-   (0.2 mm clearance, 0.3 mm drill), which is *inside* those limits and so
-   safe — but the rules are not written down in the project file, so nothing
-   enforces them.
-3. **Add BT1 and BT3.** The firmware now has three user buttons; this board
-   still has one (`SW1`, MODE). A netlist change in `design.py`.
-4. **Check the antenna keep-out.** The WROOM-32U has an external connector so
+1. **Route the last eight nets** in Pcbnew: `+3V3A`, `AUDIO_L`, `CC1`, `CC2`,
+   `DAC_LDOO`, `DAC_VNEG`, `I2S_BCK`, `I2S_LRCK`. All are around the TSSOP-20
+   DAC and the USB-C part. The interactive router will do this in minutes.
+2. **Add teardrops** once routing is done.
+3. **Check the antenna keep-out.** The WROOM-32U has an external connector so
    there is no PCB antenna to clear, but leave the module's edge unpoured.
-5. **Re-run DRC** and get it to zero before ordering anything.
-6. **Review against datasheets.** Especially the MCP73831 programming resistor
+4. **Re-run DRC** and get it to zero before ordering anything.
+5. **Review against datasheets.** Especially the MCP73831 programming resistor
    (R5 = 2 kΩ, about 500 mA) against your cell's charge rate.
-7. **Rounded corners** were dropped — arcs whose endpoints did not meet left the
+6. **Rounded corners** were dropped — arcs whose endpoints did not meet left the
    outline open, and KiCad will not guess. Add them in Pcbnew, where the editor
    keeps the ends joined.
