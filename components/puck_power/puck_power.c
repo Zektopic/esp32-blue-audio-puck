@@ -51,12 +51,15 @@ static void idle_timeout_cb(void *arg)
 
 static esp_err_t configure_radio(void)
 {
-    /* Transmit power. The source is usually in the same pocket, and the top of
-     * the range costs current for range nobody is using. Kept as a Kconfig
-     * knob because a puck in a bag with the phone across the room is a real
-     * case that wants the opposite trade. */
+    /* Transmit power, as a range the controller works within rather than a
+     * fixed output: it backs off on its own when the link is strong.
+     *
+     * The ceiling defaults to the maximum. An earlier default of 0 dBm assumed
+     * the phone would be in the same pocket, which proved optimistic -- there
+     * is usually a body between the two, and 9 dB is most of the link budget. */
+    const esp_power_level_t min_level = (esp_power_level_t)CONFIG_PUCK_BT_TX_POWER_MIN_LEVEL;
     const esp_power_level_t max_level = (esp_power_level_t)CONFIG_PUCK_BT_TX_POWER_LEVEL;
-    ESP_RETURN_ON_ERROR(esp_bredr_tx_power_set(ESP_PWR_LVL_N12, max_level), TAG,
+    ESP_RETURN_ON_ERROR(esp_bredr_tx_power_set(min_level, max_level), TAG,
                         "setting BR/EDR transmit power failed");
 
     /* Let the controller sleep between BR/EDR frames. Enabled by default in

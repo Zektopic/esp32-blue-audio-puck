@@ -20,6 +20,8 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include <inttypes.h>
+
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -61,6 +63,7 @@ typedef struct {
     bool                      fitted;
     TaskHandle_t              task;
     puck_battery_cb_t         cb;
+    bool                      warned_implausible;
     puck_battery_reading_t    reading;
     int32_t                   filtered_mv;  /*!< smoothed, -1 until the first sample */
 } puck_battery_t;
@@ -163,6 +166,22 @@ static void sample_once(void)
     /* Undo the divider. Ratio is expressed in hundredths so a 2:1 divider is
      * 200 and odd resistor pairs stay expressible without floats. */
     const int32_t cell_mv = ((int32_t)pin_mv * CONFIG_PUCK_BATTERY_DIVIDER_RATIO_X100) / 100;
+
+    /* A single-cell Li-po that is connected and not on fire sits between about
+     * 3.0 V and 4.3 V. Outside that, the reading is not a battery: the usual
+     * causes are a divider ratio that does not match the fitted resistors, or
+     * PUCK_BATTERY_ADC_GPIO pointing at a pin with nothing on it. Say so once
+     * rather than rendering a confident percentage from noise. */
+    if (cell_mv < 2500 || cell_mv > 4600) {
+        if (!s_bat.warned_implausible) {
+            s_bat.warned_implausible = true;
+            ESP_LOGW(TAG, "implausible cell voltage %" PRId32 " mV (pin %d mV, ratio %d.%02d)"
+                          " -- check the divider resistors and PUCK_BATTERY_DIVIDER_RATIO_X100",
+                     cell_mv, pin_mv,
+                     CONFIG_PUCK_BATTERY_DIVIDER_RATIO_X100 / 100,
+                     CONFIG_PUCK_BATTERY_DIVIDER_RATIO_X100 % 100);
+        }
+    }
 
     /* Exponential smoothing. Playback current draw makes the terminal voltage
      * jump around; without this the percentage flickers on screen. */
